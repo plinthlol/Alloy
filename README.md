@@ -52,4 +52,4 @@ GPL-3.0
 
 ---
 
-This `tui` branch is a fork of [rmcl](https://github.com/objz/rmcl) by [objz](https://github.com/objz). Huge thanks to them for building the foundation that this branch is built on.
+This `tui` branch is a fork of [rmcl](https://github.com/objz/rmcl) by [objz](https://github.com/objz). Huge thanks to him for building the foundation that this branch is built on.
