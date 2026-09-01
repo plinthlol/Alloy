@@ -110,15 +110,19 @@ jobs:
 
       - name: Build TUI (${{ matrix.rust-target }})
         if: runner.os != 'macOS' # macOS builds both arches in its own step
-        run: cargo build --release --locked --target ${{ matrix.rust-target }}
+        run: cargo build --release --target ${{ matrix.rust-target }}
+        env:
+          ALLOY_CURSEFORGE_API_KEY: ${{ secrets.ALLOY_CURSEFORGE_API_KEY }}
 
       # lipo needs both slices, so the generic single-target build step above
       # is skipped on macOS and both arches are built here instead.
       - name: Build TUI (macOS, both architectures)
         if: runner.os == 'macOS'
         run: |
-          cargo build --release --locked --target x86_64-apple-darwin
-          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+        env:
+          ALLOY_CURSEFORGE_API_KEY: ${{ secrets.ALLOY_CURSEFORGE_API_KEY }}
 
       - name: Package TUI (Linux)
         if: runner.os == 'Linux'

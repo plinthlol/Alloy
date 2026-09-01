@@ -152,15 +152,12 @@ impl Default for Ui {
 
 // CurseForge has no keyless/anonymous tier - every request needs a key.
 // users can set their own in Global Settings (see `api_key` above); when
-// unset, we fall back to the bundled default below so browsing works out
-// of the box for casual/test use without registering an app key at
-// console.curseforge.com first.
-// the bundled key is a *shared* key, not a per-user secret: it ships in the
-// repo and the compiled binary, so anyone can read it, and CurseForge can
-// revoke or rate-limit it at any time since it isn't tied to any one user's
-// account. treat it as a convenience default, not a guarantee — set your
-// own key in Global Settings if it stops working or you hit rate limits.
-const DEFAULT_CURSEFORGE_API_KEY: &str = "$2a$10$UG3pEQS/455W6eyE1ww5qu8ORkZ1/ejAqqkTVAbAM9tKlTtR0ZN12";
+// unset, we fall back to a compile-time baked key (injected via the
+// ALLOY_CURSEFORGE_API_KEY env var at build time) so browsing works out
+// of the box without registering an app key at console.curseforge.com
+// first. the key never appears in the source code — it's passed as a
+// build-time env var (e.g. from a GitHub Actions secret) and baked into
+// the binary via option_env!().
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 pub struct CurseForge {
@@ -170,18 +167,18 @@ pub struct CurseForge {
 
 impl CurseForge {
     /// the key actually used for requests: the user's own key if they've set
-    /// one, otherwise the bundled default. never `None` in practice — use
-    /// `is_using_default_key` to tell the two cases apart for display.
+    /// one, otherwise the compile-time baked key. returns `None` when no
+    /// key is available at all.
     pub fn effective_api_key(&self) -> Option<&str> {
         self.api_key
             .as_deref()
             .filter(|s| !s.is_empty())
-            .or(Some(DEFAULT_CURSEFORGE_API_KEY))
+            .or(option_env!("ALLOY_CURSEFORGE_API_KEY"))
     }
 
     /// true when no user-supplied key is set and we're falling back to the
-    /// bundled default — lets the settings UI say so instead of silently
-    /// pretending nothing is configured.
+    /// compile-time baked key (or nothing) — lets the settings UI say so
+    /// instead of silently pretending nothing is configured.
     pub fn is_using_default_key(&self) -> bool {
         self.api_key.as_deref().filter(|s| !s.is_empty()).is_none()
     }
@@ -251,24 +248,23 @@ mod tests {
     }
 
     #[test]
-    fn curseforge_api_key_falls_back_to_default_when_absent() {
+    fn curseforge_api_key_falls_back_to_compiled_when_absent() {
         let cf = CurseForge::default();
-        assert_eq!(
-            cf.effective_api_key(),
-            Some(DEFAULT_CURSEFORGE_API_KEY)
-        );
+        // when compiled with ALLOY_CURSEFORGE_API_KEY set, effective_api_key
+        // returns it; otherwise None. either way, is_using_default_key is true
+        // (no user-supplied key).
+        let compiled = option_env!("ALLOY_CURSEFORGE_API_KEY");
+        assert_eq!(cf.effective_api_key(), compiled);
         assert!(cf.is_using_default_key());
     }
 
     #[test]
-    fn curseforge_api_key_falls_back_to_default_when_empty() {
+    fn curseforge_api_key_falls_back_to_compiled_when_empty() {
         let cf = CurseForge {
             api_key: Some(String::new()),
         };
-        assert_eq!(
-            cf.effective_api_key(),
-            Some(DEFAULT_CURSEFORGE_API_KEY)
-        );
+        let compiled = option_env!("ALLOY_CURSEFORGE_API_KEY");
+        assert_eq!(cf.effective_api_key(), compiled);
         assert!(cf.is_using_default_key());
     }
 
