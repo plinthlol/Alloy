@@ -48,4 +48,8 @@ cargo build --release   # needs Rust (2024 edition) and a JDK
 
 ## License
 
-MIT
+GPL-3.0
+
+---
+
+This `tui` branch is a fork of [rmcl](https://github.com/objz/rmcl) by [objz](https://github.com/objz). Huge thanks to them for building the foundation that this branch is built on.
