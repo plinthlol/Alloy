@@ -1,0 +1,411 @@
+// the instance list on the left side of the UI.
+// handles search/filter, scrollbar sync, and inline renaming.
+// each row shows instance name + "last played" or current run state.
+
+use crate::config::theme::{BORDER_STYLE, THEME};
+use crossterm::event::KeyCode;
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Borders, Scrollbar, ScrollbarOrientation, ScrollbarState},
+};
+use tui_widget_list::{ListBuilder, ListState as TuiListState, ListView};
+
+use crate::instance::models::InstanceConfig;
+use crate::running::{RunState, get as get_run_state};
+use crate::tui::app::FocusedArea;
+
+use super::{search::SearchState, styled_title};
+
+// rough human-friendly time delta. not precise — "2 months ago" is close
+// enough when months are ~30 days.
+fn format_last_played(last_played: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    let Some(dt) = last_played else {
+        return "Never played".to_string();
+    };
+    let secs = chrono::Utc::now()
+        .signed_duration_since(dt)
+        .num_seconds()
+        .max(0) as u64;
+    match secs {
+        0..=59 => "Just now".to_string(),
+        60..=3599 => format!("{} minutes ago", secs / 60),
+        3600..=86399 => format!("{} hours ago", secs / 3600),
+        86400..=2591999 => format!("{} days ago", secs / 86400),
+        2592000..=31535999 => format!("{} months ago", secs / 2592000),
+        _ => "Over a year ago".to_string(),
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct State {
+    pub instances: Vec<InstanceConfig>,
+    pub list_state: TuiListState,
+    pub scrollbar_state: ScrollbarState,
+    pub show_popup: bool,
+    pub search: SearchState,
+    pub renaming: Option<String>,
+}
+
+impl State {
+    pub fn with_instances(instances: Vec<InstanceConfig>) -> Self {
+        let count = instances.len();
+        let mut s = State {
+            instances,
+            list_state: TuiListState::default(),
+            scrollbar_state: ScrollbarState::default(),
+            show_popup: false,
+            search: SearchState::default(),
+            renaming: None,
+        };
+        if count > 0 {
+            s.list_state.selected = Some(0);
+        }
+        s.update_scrollbar();
+        s
+    }
+
+    pub fn selected_instance(&self) -> Option<&InstanceConfig> {
+        let filtered = self.filtered_indices();
+        self.list_state
+            .selected
+            .and_then(|i| filtered.get(i))
+            .and_then(|&idx| self.instances.get(idx))
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        self.instances
+            .iter()
+            .enumerate()
+            .filter(|(_, inst)| self.search.matches(&inst.name))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn next(&mut self) {
+        let count = self.filtered_indices().len();
+        if count == 0 {
+            return;
+        }
+        self.list_state.next();
+        if self.list_state.selected.unwrap_or(0) >= count {
+            self.list_state.selected = Some(0);
+        }
+        self.update_scrollbar();
+    }
+
+    fn previous(&mut self) {
+        let count = self.filtered_indices().len();
+        if count == 0 {
+            return;
+        }
+        self.list_state.previous();
+        if self.list_state.selected.is_none() {
+            self.list_state.selected = Some(count.saturating_sub(1));
+        }
+        self.update_scrollbar();
+    }
+
+    fn update_scrollbar(&mut self) {
+        let filtered = self.filtered_indices();
+        let count = filtered.len();
+        let items = count.saturating_sub(1);
+        let index = self.list_state.selected.unwrap_or(0);
+
+        if count == 0 {
+            self.list_state.selected = None;
+        } else if self.list_state.selected.is_none() {
+            self.list_state.selected = Some(0);
+        } else if index > items {
+            self.list_state.selected = Some(items);
+        }
+
+        self.scrollbar_state =
+            ScrollbarState::new(items).position(self.list_state.selected.unwrap_or(0));
+    }
+
+    pub fn wants_popup(&self) -> bool {
+        self.show_popup
+    }
+
+    pub fn remove_instance(&mut self, name: &str) {
+        let before = self.instances.len();
+        self.instances.retain(|i| i.name != name);
+        let after = self.instances.len();
+        if after < before {
+            self.update_scrollbar();
+        }
+    }
+
+    pub fn add_instance(&mut self, instance: InstanceConfig) {
+        self.instances.push(instance);
+        self.update_scrollbar();
+    }
+
+    pub fn replace_instance(&mut self, old_name: &str, instance: InstanceConfig) {
+        if let Some(existing) = self
+            .instances
+            .iter_mut()
+            .find(|i| i.name == old_name || i.name == instance.name)
+        {
+            *existing = instance;
+        } else {
+            self.instances.push(instance);
+        }
+        self.update_scrollbar();
+    }
+}
+
+// the sidebar's key handler, same free-fn shape as every other widget's
+// handle_key: return true when the key was consumed. the actual delete
+// ('d') runs through the input router's confirm-popup flow, so it's a
+// deliberate no-op here.
+pub fn handle_key(key_event: &crossterm::event::KeyEvent, state: &mut State) -> bool {
+    use super::search::SearchAction;
+    match state.search.handle_key(key_event) {
+        SearchAction::Unhandled => {}
+        SearchAction::Activated
+        | SearchAction::Edited
+        | SearchAction::Confirmed
+        | SearchAction::Deactivated => {
+            state.list_state.selected = Some(0);
+            state.update_scrollbar();
+            return true;
+        }
+        // every other key while searching is consumed by the search box
+        SearchAction::Handled => return true,
+    }
+
+    match key_event.code {
+        KeyCode::Char('a') => {
+            state.show_popup = true;
+            state.update_scrollbar();
+            true
+        }
+        KeyCode::Char('d') => true,
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.next();
+            true
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.previous();
+            true
+        }
+        _ => false,
+    }
+}
+
+pub fn render(frame: &mut Frame, area: Rect, focused: FocusedArea, state: &mut State) {
+    let theme = THEME.as_ref();
+    let color = if focused == FocusedArea::Instances {
+        theme.accent()
+    } else {
+        theme.border()
+    };
+
+    let mut block = Block::default()
+        .title(styled_title("Instances", true))
+        .borders(Borders::ALL)
+        .border_type(BORDER_STYLE.to_border_type())
+        .border_style(Style::default().fg(color));
+
+    if let Some(search_line) = state.search.title_line() {
+        block = block.title_top(search_line);
+    }
+
+    let scrollbar_area = Rect {
+        x: area.x + area.width.saturating_sub(1),
+        y: area.y + 1,
+        width: 1,
+        height: area.height.saturating_sub(2),
+    };
+
+    let filtered = state.filtered_indices();
+    let count = filtered.len();
+
+    let builder = ListBuilder::new(|context| {
+        let theme = THEME.as_ref();
+        let idx = filtered[context.index];
+        let instance = &state.instances[idx];
+
+        let stripe_bg = if context.index % 2 == 0 {
+            theme.background()
+        } else {
+            theme.stripe()
+        };
+
+        let (name_style, meta_style, bg) = if context.is_selected {
+            (
+                Style::default()
+                    .fg(theme.accent())
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text_dim()),
+                stripe_bg,
+            )
+        } else {
+            (
+                Style::default()
+                    .fg(theme.text())
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.text_dim()),
+                stripe_bg,
+            )
+        };
+
+        let selector = if context.is_selected {
+            Span::styled("\u{258c} ", Style::default().fg(theme.accent()))
+        } else {
+            Span::raw("  ")
+        };
+
+        let is_renaming = context.is_selected && state.renaming.is_some();
+        let name_line = if is_renaming {
+            let rename_val = state.renaming.as_deref().unwrap_or("");
+            Line::from(vec![
+                selector.clone(),
+                Span::styled(rename_val, Style::default().fg(theme.text())),
+                Span::styled(
+                    "\u{2588}",
+                    Style::default()
+                        .fg(theme.text_dim())
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                selector.clone(),
+                Span::styled(instance.name.as_str(), name_style),
+            ])
+        };
+
+        let (meta_text, meta_text_style) = match get_run_state(&instance.name) {
+            Some(RunState::Authenticating) => (
+                "Authenticating".to_string(),
+                Style::default().fg(theme.success()),
+            ),
+            Some(RunState::Running) | Some(RunState::Starting) => {
+                ("Playing".to_string(), Style::default().fg(theme.success()))
+            }
+            Some(RunState::Orphaned(_)) => (
+                // same green as Running/Starting above - orphaned just
+                // means alloy lost its handle on the process, not that
+                // anything's actually wrong; it's still playing.
+                "Playing".to_string(),
+                Style::default().fg(theme.success()),
+            ),
+            _ => (format_last_played(instance.last_played), meta_style),
+        };
+
+        let meta_line = Line::from(vec![
+            selector.clone(),
+            Span::styled(meta_text, meta_text_style),
+        ]);
+
+        let item = Text::from(vec![name_line, meta_line]).style(Style::default().bg(bg));
+        (item, 2)
+    });
+
+    let list = ListView::new(builder, count).block(block);
+
+    frame.render_stateful_widget(list, area, &mut state.list_state);
+
+    frame.render_stateful_widget(
+        Scrollbar::default()
+            .orientation(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("\u{25b2}"))
+            .style(
+                Style::default()
+                    .fg(theme.text_dim())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .thumb_symbol("\u{2551}")
+            .track_symbol(Some(""))
+            .end_symbol(Some("\u{25bc}")),
+        scrollbar_area,
+        &mut state.scrollbar_state,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_last_played_none_returns_never_played() {
+        assert_eq!(format_last_played(None), "Never played");
+    }
+
+    // each #[case] picks a "seconds ago" value that lands in exactly one
+    // bucket of the match. mutating any bucket boundary (e.g. 3600 to 3601,
+    // or "minutes" to "seconds") makes one of these cases fail.
+    #[rstest::rstest]
+    #[case::just_now(0, "Just now")]
+    #[case::just_now_upper(59, "Just now")]
+    #[case::minutes(60, "1 minutes ago")]
+    #[case::minutes_upper(3599, "59 minutes ago")]
+    #[case::hours(3600, "1 hours ago")]
+    #[case::hours_upper(86_399, "23 hours ago")]
+    #[case::days(86_400, "1 days ago")]
+    #[case::days_upper(2_591_999, "29 days ago")]
+    #[case::months(2_592_000, "1 months ago")]
+    #[case::months_upper(31_535_999, "12 months ago")]
+    #[case::over_a_year(31_536_000, "Over a year ago")]
+    fn format_last_played_buckets(#[case] seconds_ago: i64, #[case] expected: &str) {
+        let dt = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
+        assert_eq!(format_last_played(Some(dt)), expected);
+    }
+
+    use crate::instance::models::{InstanceConfig, ModLoader};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn synthetic_instance(name: &str) -> InstanceConfig {
+        // last_played intentionally None so the rendered text is the
+        // deterministic "Never played" string. anything else would make the
+        // snapshot drift relative to chrono::Utc::now().
+        InstanceConfig {
+            name: name.to_string(),
+            game_version: "1.20.1".to_string(),
+            loader: ModLoader::Vanilla,
+            loader_version: None,
+            created: chrono::Utc::now(),
+            last_played: None,
+            java_path: None,
+            memory_max: None,
+            memory_min: None,
+            jvm_args: vec![],
+            resolution: None,
+            use_system_glfw: false,
+        }
+    }
+
+    #[test]
+    fn instances_list_renders_three_instances() {
+        let mut state = State::with_instances(vec![
+            synthetic_instance("Vanilla 1.20.1"),
+            synthetic_instance("Forge Pack"),
+            synthetic_instance("Fabric Test"),
+        ]);
+
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render(f, f.area(), FocusedArea::Instances, &mut state))
+            .unwrap();
+
+    }
+
+    #[test]
+    fn instances_list_renders_empty() {
+        let mut state = State::with_instances(vec![]);
+
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render(f, f.area(), FocusedArea::Instances, &mut state))
+            .unwrap();
+
+    }
+}

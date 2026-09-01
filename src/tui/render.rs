@@ -1,0 +1,321 @@
+// layout and rendering. the main frame is split into:
+//   left 20%: instance sidebar
+//   right 80%: title bar + content area + bottom bar (account / details / status)
+// popups and error toasts render on top of everything.
+
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout},
+};
+use tachyonfx::{EffectRenderer, Interpolation, Motion, fx};
+
+use super::app::{App, ErrorEffectState, FocusedArea};
+use super::widgets::{self, popups::confirm as confirm_popup, popups::content_browse, popups::new_instance};
+use crate::tui::error_buffer;
+use crate::tui::widgets::popups::confirm::{ConfirmPopup, confirm_popup_area};
+use crate::tui::widgets::popups::error::{ErrorPopup, popup_area};
+
+impl App {
+    pub(super) fn render_frame(&mut self, frame: &mut Frame) {
+        use crate::config::theme::THEME;
+        use ratatui::style::Style;
+        use ratatui::widgets::Block;
+
+        let theme = THEME.as_ref();
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme.background())),
+            frame.area(),
+        );
+
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(20), Constraint::Percentage(80)])
+            .split(frame.area());
+
+        widgets::instances::render(frame, chunks[0], self.focused, &mut self.instances_state);
+
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(4),
+            ])
+            .split(chunks[1]);
+
+        widgets::content::title(
+            frame,
+            main_chunks[0],
+            self.focused,
+            self.instances_state.selected_instance(),
+            &mut self.throbber_state,
+            self.content_renaming.as_deref(),
+        );
+        widgets::content::render(
+            frame,
+            main_chunks[1],
+            self.focused,
+            &mut self.content,
+            self.instances_state.selected_instance(),
+            &self.instance_manager.instances_dir,
+            &self.picker,
+            &mut self.throbber_state,
+        );
+
+        let bottom_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(main_chunks[2]);
+
+        widgets::account::render(
+            frame,
+            bottom_chunks[0],
+            self.focused,
+            &mut self.account_state,
+        );
+        widgets::status::render(
+            frame,
+            bottom_chunks[1],
+            self.focused,
+            &mut self.throbber_state,
+        );
+
+        if self.focused == FocusedArea::OverviewExpanded {
+            self.render_log_overlay(frame);
+        }
+
+        // error toasts stack from the top, each one below the previous
+        let all_errors = error_buffer::peek_all_errors();
+        self.sync_error_effects(&all_errors);
+        let mut next_y: u16 = 1;
+        for event in all_errors {
+            let elapsed_ms = event.pushed_at.elapsed().as_millis();
+            if let Some(area) = popup_area(frame.area(), &event.message, next_y, elapsed_ms) {
+                next_y = next_y.saturating_add(area.height + 1);
+                frame.render_widget(ErrorPopup::new(event.clone()), area);
+                self.render_error_effect(frame, area, &event, elapsed_ms);
+            }
+        }
+
+        if self.instances_state.show_popup {
+            let area = new_instance::popup_rect(frame.area());
+            new_instance::render(frame, area, self.focused, &self.picker);
+        }
+
+        if content_browse::is_open() {
+            let area = content_browse::popup_rect(frame.area());
+            content_browse::render(frame, area, &self.picker);
+        }
+
+        if self.focused == FocusedArea::ConfirmDelete
+            && let Some(target) = confirm_popup::pending_target()
+        {
+            let area = confirm_popup_area(frame.area(), &target);
+            frame.render_widget(ConfirmPopup::for_target(&target), area);
+        }
+
+        if self.focused == FocusedArea::JavaSelect {
+            let area = widgets::popups::java_select::popup_rect(frame.area());
+            widgets::popups::java_select::render(frame, area);
+        }
+
+        if self.focused == FocusedArea::GlobalSettings {
+            let area = widgets::popups::global_settings::popup_rect(frame.area());
+            widgets::popups::global_settings::render(frame, area);
+        }
+    }
+
+    // full-screen log viewer with search highlighting and auto-scroll.
+    // auto-sticks to the bottom unless the user scrolled up manually
+    fn render_log_overlay(&mut self, frame: &mut Frame) {
+        use crate::config::theme::{BORDER_STYLE, THEME};
+        use crate::tui::logging::get_app_logs;
+        use ratatui::{
+            layout::{Alignment, Margin},
+            style::{Modifier, Style},
+            text::Line,
+            widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation},
+        };
+
+        let theme = THEME.as_ref();
+        let area = frame.area();
+        let overlay = area.inner(Margin::new(1, 1));
+
+        frame.render_widget(Clear, overlay);
+
+        let all_lines = get_app_logs();
+        let filtered: Vec<&String> = all_lines
+            .iter()
+            .filter(|l| self.log_overlay_search.matches(l))
+            .collect();
+
+        let visible_height = overlay.height.saturating_sub(2) as usize;
+        let was_at_bottom =
+            self.log_overlay_scroll >= self.log_overlay_max_scroll.saturating_sub(1);
+        self.log_overlay_max_scroll = filtered.len().saturating_sub(visible_height);
+        if was_at_bottom || self.log_overlay_scroll > self.log_overlay_max_scroll {
+            self.log_overlay_scroll = self.log_overlay_max_scroll;
+        }
+        self.log_overlay_scrollbar =
+            ratatui::widgets::ScrollbarState::new(self.log_overlay_max_scroll)
+                .position(self.log_overlay_scroll);
+
+        let mut block = Block::bordered()
+            .title_top(
+                Line::from(" Logs ").style(
+                    Style::default()
+                        .fg(theme.text())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .title_bottom(
+                crate::tui::widgets::popups::keybind_line(&[("O", " close"), ("/", " search")])
+                    .alignment(Alignment::Right),
+            )
+            .border_type(BORDER_STYLE.to_border_type())
+            .border_style(Style::default().fg(theme.accent()));
+
+        if let Some(sl) = self.log_overlay_search.title_line() {
+            block = block.title_top(sl);
+        }
+
+        let inner = block.inner(overlay);
+        frame.render_widget(block, overlay);
+
+        let search = &self.log_overlay_search;
+        let styled: Vec<Line> = filtered
+            .iter()
+            .skip(self.log_overlay_scroll)
+            .take(visible_height)
+            .map(|line| {
+                let style = if line.contains("ERROR") || line.contains("FATAL") {
+                    Style::default().fg(theme.error())
+                } else if line.contains("WARN") {
+                    Style::default().fg(theme.warning())
+                } else if line.contains("DEBUG") || line.contains("TRACE") {
+                    Style::default().fg(theme.text_dim())
+                } else {
+                    Style::default().fg(theme.text())
+                };
+                search.highlight_line(line, style)
+            })
+            .collect();
+
+        frame.render_widget(Paragraph::new(styled), inner);
+
+        let scrollbar_area = ratatui::layout::Rect {
+            x: overlay.x + overlay.width.saturating_sub(1),
+            y: overlay.y + 1,
+            width: 1,
+            height: overlay.height.saturating_sub(2),
+        };
+        frame.render_stateful_widget(
+            Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("\u{25b2}"))
+                .style(
+                    Style::default()
+                        .fg(theme.text_dim())
+                        .add_modifier(Modifier::BOLD),
+                )
+                .thumb_symbol("\u{2551}")
+                .track_symbol(Some(""))
+                .end_symbol(Some("\u{25bc}")),
+            scrollbar_area,
+            &mut self.log_overlay_scrollbar,
+        );
+    }
+
+    // keeps the effect map in sync with current errors: removes effects for
+    // dismissed errors and creates slide-in effects for new ones
+    fn sync_error_effects(&mut self, events: &[error_buffer::ErrorEvent]) {
+        use crate::config::theme::THEME;
+        let theme = THEME.as_ref();
+        let bg = theme.background();
+        let active_ids: std::collections::HashSet<u64> =
+            events.iter().map(|event| event.id).collect();
+        self.error_effects.retain(|id, _| active_ids.contains(id));
+
+        for event in events {
+            self.error_effects.entry(event.id).or_insert_with(|| {
+                ErrorEffectState::SlidingIn(
+                    fx::slide_in(
+                        Motion::RightToLeft,
+                        4,
+                        0,
+                        bg,
+                        (250, Interpolation::CubicOut),
+                    ),
+                    std::time::Instant::now(),
+                )
+            });
+        }
+    }
+
+    // drives each toast through slide-in → idle → slide-out; flips to
+    // FadingOut once we're within fly_out_ms of auto-dismiss.
+    fn render_error_effect(
+        &mut self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        event: &error_buffer::ErrorEvent,
+        elapsed_ms: u128,
+    ) {
+        use crate::config::SETTINGS;
+        use crate::config::theme::THEME;
+        let theme = THEME.as_ref();
+        let bg = theme.background();
+        let fly_out_ms = SETTINGS.ui.error_fly_out_ms as u128;
+        let fly_start_ms = SETTINGS.ui.error_auto_dismiss_ms as u128
+            - fly_out_ms.min(SETTINGS.ui.error_auto_dismiss_ms as u128);
+
+        if elapsed_ms >= fly_start_ms {
+            let entry = self
+                .error_effects
+                .entry(event.id)
+                .or_insert(ErrorEffectState::Idle);
+            if !matches!(entry, ErrorEffectState::FadingOut(..)) {
+                *entry = ErrorEffectState::FadingOut(
+                    fx::slide_out(
+                        Motion::LeftToRight,
+                        4,
+                        0,
+                        bg,
+                        (fly_out_ms as u32, Interpolation::CubicIn),
+                    ),
+                    std::time::Instant::now(),
+                );
+            }
+        }
+
+        if let Some(effect_state) = self.error_effects.get_mut(&event.id) {
+            match effect_state {
+                ErrorEffectState::SlidingIn(effect, started) => {
+                    let dt = started.elapsed().as_millis() as u32;
+                    if effect.running() {
+                        frame.render_effect(
+                            effect,
+                            area,
+                            tachyonfx::Duration::from_millis(dt.min(32)),
+                        );
+                        *started = std::time::Instant::now();
+                    } else {
+                        *effect_state = ErrorEffectState::Idle;
+                    }
+                }
+                ErrorEffectState::Idle => {}
+                ErrorEffectState::FadingOut(effect, started) => {
+                    let dt = started.elapsed().as_millis() as u32;
+                    if effect.running() {
+                        frame.render_effect(
+                            effect,
+                            area,
+                            tachyonfx::Duration::from_millis(dt.min(32)),
+                        );
+                        *started = std::time::Instant::now();
+                    }
+                }
+            }
+        }
+    }
+}

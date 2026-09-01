@@ -1,0 +1,25 @@
+# built in themes:
+#   catppuccin, dracula, nord, gruvbox, one-dark,
+#   solarized, tailwind, tokyo-night, rose-pine, terminal
+#
+# custom themes: 
+#   theme = "my-theme"        (loads ~/.config/mcl/theme/my-theme.toml)
+#   theme = "/path/to/file"   (loads from absolute path)
+theme = "terminal"
+
+# rounded, plain, double, thick
+border_style = "plain"
+
+# override current theme (not a custom theme):
+# [custom]
+# accent = { Rgb = [249, 115, 22] }
+# text = "White"
+# text_dim = "DarkGray"
+# text_bright = "White"
+# border = "Gray"
+# surface = { Rgb = [36, 36, 36] }
+# background = { Rgb = [30, 30, 30] }
+# error = "Red"
+# warning = "Yellow"
+# success = "Green"
+# info = "Cyan"

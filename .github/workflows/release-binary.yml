@@ -1,0 +1,230 @@
+# Builds both the alloysh (TUI) and alloyctl (CLI) binaries for Linux, macOS,
+# and Windows, strips them down, UPX-compresses them, and attaches the artifacts
+# to a GitHub Release.
+#
+#   - Linux   : fully static musl build (zero runtime dependencies), stripped, UPX
+#               + Go binary (statically linked by default), stripped, UPX
+#   - macOS   : universal binary (Intel + Apple Silicon via lipo), stripped, UPX
+#               + Go universal2 binary, stripped, UPX
+#   - Windows : MSVC build (the release profile already strips symbols), UPX
+#               + Go binary, UPX
+#
+# Trigger: run manually from the Actions tab (Actions -> "Release binary" ->
+# Run workflow). Provide a version like v0.1.0 to also create a GitHub
+# Release with the binaries attached; leave it empty to just build artifacts.
+#
+# NOTE: this file is named release-binary.yml on purpose — cargo-dist
+# (dist-workspace.toml) generates its own .github/workflows/release.yml, so a
+# differently-named file keeps the two pipelines from clobbering each other.
+
+name: Release binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to publish under (e.g. v0.1.0). Leave empty to just build artifacts without creating a release."
+        required: false
+        default: ""
+
+permissions:
+  contents: write # softprops/action-gh-release creates the Release + uploads
+
+jobs:
+  build:
+    name: alloysh + alloyctl (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # a failure on one OS shouldn't cancel the others
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-musl
+            extra-targets: x86_64-unknown-linux-musl
+            # crt-static is the default for musl; setting it explicitly makes
+            # the "no dynamic dependencies" guarantee visible in the flags.
+            rustflags: "-C target-feature=+crt-static"
+            tui-release: alloysh-linux-x86_64
+            cli-release: alloyctl-linux-x86_64
+            go-os: linux
+            go-arch: amd64
+          - name: macos-universal
+            os: macos-latest
+            rust-target: aarch64-apple-darwin
+            extra-targets: x86_64-apple-darwin,aarch64-apple-darwin
+            rustflags: ""
+            tui-release: alloysh-macos-universal
+            cli-release: alloyctl-macos-universal
+            go-os: macos
+            go-arch: ""
+            go-extra-archs: "amd64 arm64"
+          - name: windows-x86_64
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            extra-targets: x86_64-pc-windows-msvc
+            rustflags: ""
+            tui-release: alloysh-windows-x86_64.exe
+            cli-release: alloyctl-windows-x86_64.exe
+            go-os: windows
+            go-arch: amd64
+
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      # ring (via rustls -> reqwest/oauth2) compiles C/asm code with the `cc`
+      # crate. for the musl target it needs musl-gcc, which the musl-tools
+      # package installs below; this env var points cc-rs at it directly.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- TUI (Rust) build ----
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.extra-targets }}
+
+      # build.rs compiles java/AlloyShim.java, so javac + jar must be on PATH
+      - name: Install JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install musl C toolchain and UPX (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools upx-ucl
+
+      - name: Install UPX (macOS)
+        if: runner.os == 'macOS'
+        run: brew install upx
+
+      - name: Install UPX (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install upx -y
+
+      - name: Build TUI (${{ matrix.rust-target }})
+        if: runner.os != 'macOS' # macOS builds both arches in its own step
+        run: cargo build --release --locked --target ${{ matrix.rust-target }}
+
+      # lipo needs both slices, so the generic single-target build step above
+      # is skipped on macOS and both arches are built here instead.
+      - name: Build TUI (macOS, both architectures)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Package TUI (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cp "target/${{ matrix.rust-target }}/release/alloysh" "${{ matrix.tui-release }}"
+          strip "${{ matrix.tui-release }}"
+          upx -9 "${{ matrix.tui-release }}"
+          sha256sum "${{ matrix.tui-release }}" > "${{ matrix.tui-release }}.sha256"
+
+      - name: Package TUI (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          lipo -create -output "${{ matrix.tui-release }}" \
+            target/x86_64-apple-darwin/release/alloysh \
+            target/aarch64-apple-darwin/release/alloysh
+          strip "${{ matrix.tui-release }}"
+          upx -9 "${{ matrix.tui-release }}" || echo "Warning: UPX compression failed on macOS, binary not compressed"
+          shasum -a 256 "${{ matrix.tui-release }}" > "${{ matrix.tui-release }}.sha256"
+
+      - name: Package TUI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp "target/${{ matrix.rust-target }}/release/alloysh.exe" "${{ matrix.tui-release }}"
+          upx -9 "${{ matrix.tui-release }}" || echo "Warning: UPX compression failed on Windows, binary not compressed"
+          sha256sum "${{ matrix.tui-release }}" > "${{ matrix.tui-release }}.sha256"
+
+      # ---- CLI (Go) build ----
+      # The CLI lives on the `cli` branch (Go source), so check it out into a
+      # separate directory and build from there.
+      - name: Checkout CLI branch
+        uses: actions/checkout@v4
+        with:
+          ref: cli
+          path: alloy-cli-src
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Build CLI (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cd alloy-cli-src
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "../${{ matrix.cli-release }}" ./cmd/alloyctl
+          upx -9 "../${{ matrix.cli-release }}"
+
+      - name: Build CLI (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cd alloy-cli-src
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "../${{ matrix.cli-release }}.x86_64" ./cmd/alloyctl
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o "../${{ matrix.cli-release }}.arm64" ./cmd/alloyctl
+          lipo -create -output "../${{ matrix.cli-release }}" "../${{ matrix.cli-release }}.x86_64" "../${{ matrix.cli-release }}.arm64"
+          rm "../${{ matrix.cli-release }}.x86_64" "../${{ matrix.cli-release }}.arm64"
+          upx -9 "../${{ matrix.cli-release }}" || echo "Warning: UPX compression failed on macOS, binary not compressed"
+
+      - name: Build CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd alloy-cli-src
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o "../${{ matrix.cli-release }}" ./cmd/alloyctl
+          upx -9 "../${{ matrix.cli-release }}" || echo "Warning: UPX compression failed on Windows, binary not compressed"
+
+      - name: Generate CLI checksums (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sha256sum "${{ matrix.cli-release }}" > "${{ matrix.cli-release }}.sha256"
+
+      - name: Generate CLI checksums (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          sha256sum "${{ matrix.cli-release }}" > "${{ matrix.cli-release }}.sha256"
+
+      # ---- Upload artifacts ----
+      # both TUI and CLI artifacts are uploaded so manual runs still leave
+      # downloadable files
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.tui-release }}
+            ${{ matrix.tui-release }}.sha256
+            ${{ matrix.cli-release }}
+            ${{ matrix.cli-release }}.sha256
+
+      # publishes under the version given in the manual run. the tag is
+      # auto-created at the default branch if it doesn't exist yet. skipped
+      # when no version was provided (artifacts are still downloadable above).
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.event.inputs.version != ''
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: |
+            ${{ matrix.tui-release }}
+            ${{ matrix.tui-release }}.sha256
+            ${{ matrix.cli-release }}
+            ${{ matrix.cli-release }}.sha256
+          fail_on_unmatched_files: true

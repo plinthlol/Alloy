@@ -1,0 +1,83 @@
+[package]
+name = "alloy"
+version = "1.0.0"
+authors = ["plinthlol"]
+edition = "2024"
+description = "A Minecraft launcher, Minimal but Featureful."
+repository = "https://github.com/plinthlol/alloy"
+homepage = "https://github.com/plinthlol/alloy"
+license = "MIT"
+readme = "README.md"
+keywords = ["minecraft", "launcher", "tui", "ratatui"]
+categories = ["command-line-utilities", "games"]
+
+[package.metadata.wix]
+upgrade-guid = "BEC08BE4-6A8F-4C1D-A1B4-B1AC963000AE"
+path-guid = "E5863AC2-13FC-45C8-B79D-55338F371A8A"
+license = false
+eula = false
+
+[[bin]]
+name = "alloysh"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4.39", features = ["serde"] }
+color-eyre = "0.6.3"
+crossterm = "0.29.0"
+log = "0.4"
+ratatui = { version = "0.30.0", features = ["serde"] }
+ratatui-themekit = { version = "0.6", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0"
+toml = "1.1.2"
+tachyonfx = "0.25"
+throbber-widgets-tui = "0.11"
+thiserror = "2"
+tokio = { version = "1.0.0", features = ["full"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tui-prompts = "0.6"
+tui-logger = { version = "0.18", features = ["tracing-support"] }
+tui-widget-list = "0.15"
+ratatui-image = { version = "10.0.6", default-features = false, features = ["crossterm"] }
+# png always (mod/resourcepack/world icons), plus jpeg/webp/gif since project
+# icons fetched from Modrinth/CurseForge come in whatever format the author
+# uploaded - without these, load_from_memory silently fails to decode most
+# web icons and the thumbnail slot just stays blank.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+zip = { version = "8.5.1", default-features = false, features = ["deflate"] }
+tar = "0.4"
+oauth2 = "5.0.0"
+open = "5"
+which = "8.0.2"
+dirs = "6.0.0"
+notify = "8"
+regex = "1"
+fast-strip-ansi = "0.13"
+libcasr = "2.13"
+md-5 = "0.11"
+flate2 = "1"
+base64 = "0.22"
+libc = "0.2"
+
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+rstest = "0.23"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
