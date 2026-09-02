@@ -139,7 +139,7 @@ fn step_keybinds(state: &ContentBrowseState) -> Line<'static> {
                 ])
             }
         }
-        BrowseStep::Version => keybind_line(&[("h", " back"), ("Enter", " install")]),
+        BrowseStep::Version => keybind_line(&[("b", " back"), ("Enter", " install")]),
     }
 }
 

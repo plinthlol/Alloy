@@ -12,8 +12,10 @@ use image::DynamicImage;
 use ratatui::{
     Frame,
     layout::Rect,
-    widgets::{Paragraph, Widget, Wrap},
+    style::{Style},
+    widgets::{Block, Clear, Paragraph, StatefulWidget, Widget, Wrap},
 };
+use ratatui_image::{Resize, StatefulImage, protocol::StatefulProtocol};
 
 use crate::config::theme::THEME;
 use crate::net::{MAX_PROVIDER_ASSET_BYTES, HttpClient};
@@ -49,6 +51,16 @@ pub struct DescriptionState {
     pub error: Option<String>,
     pub scroll: usize,
     pub max_scroll: usize,
+
+    // gallery mode: (url, title) per image, grid selection + scroll, and a
+    // full-image preview overlay flag. protocols cache the terminal-encoded
+    // thumbnails per url so the grid renders cheaply after the first frame.
+    pub gallery: Vec<GalleryItem>,
+    pub gallery_open: bool,
+    pub gallery_idx: usize,
+    pub gallery_scroll_row: usize,
+    pub preview_open: bool,
+    gallery_protocols: HashMap<String, StatefulProtocol>,
 }
 
 impl Default for DescriptionState {
@@ -62,16 +74,25 @@ impl Default for DescriptionState {
             error: None,
             scroll: 0,
             max_scroll: 0,
+            gallery: Vec::new(),
+            gallery_open: false,
+            gallery_idx: 0,
+            gallery_scroll_row: 0,
+            preview_open: false,
+            gallery_protocols: HashMap::new(),
         }
     }
 }
+
+// gallery grid paging step (PageUp/PageDown)
+const GRID_PAGE: usize = 9;
 
 static DESCRIPTION_STATE: LazyLock<Arc<Mutex<DescriptionState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(DescriptionState::default())));
 
 // fetched bodies, so re-opening a project you already viewed is instant.
 // key = DescriptionSource::key() -> (title, markdown/html body).
-static BODY_CACHE: LazyLock<Mutex<HashMap<String, (String, String)>>> =
+static BODY_CACHE: LazyLock<Mutex<HashMap<String, (String, String, Vec<GalleryItem>)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // decoded inline document images, keyed (source_key, image url) — same
@@ -81,17 +102,46 @@ static IMAGE_CACHE: LazyLock<Mutex<HashMap<(String, String), DynamicImage>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn is_open() -> bool {
-    DESCRIPTION_STATE.lock().map(|s| s.open).unwrap_or(false)
+    lock_state().open
+}
+
+/// test/debug probe: (open, has_document, error) snapshot.
+#[doc(hidden)]
+pub fn debug_snapshot() -> (bool, bool, Option<String>) {
+    let state = lock_state();
+    (state.open, state.document.is_some(), state.error.clone())
+}
+
+// poison-proof lock helpers: a panic while holding a description lock (e.g.
+// inside markdown::render) would otherwise poison the mutex and silently
+// kill the whole feature — open() would return early, is_open() would read
+// false, and Enter would appear dead with zero logs. recovering the inner
+// data keeps the feature working; the panic itself already surfaced through
+// the terminal panic hook.
+fn lock_state() -> std::sync::MutexGuard<'static, DescriptionState> {
+    DESCRIPTION_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_bodies() -> std::sync::MutexGuard<'static, HashMap<String, (String, String, Vec<GalleryItem>)>> {
+    BODY_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_images() -> std::sync::MutexGuard<'static, HashMap<(String, String), DynamicImage>> {
+    IMAGE_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub fn open(source: DescriptionSource, fallback_title: &str) {
+    tracing::info!("Description open requested for {}", source.key());
     let fallback_title = fallback_title.to_string();
     let key = source.key();
     let request_id = {
-        let mut state = match DESCRIPTION_STATE.lock() {
-            Ok(state) => state,
-            Err(_) => return,
-        };
+        let mut state = lock_state();
         state.request_id = state.request_id.wrapping_add(1);
         state.open = true;
         state.source_key = key.clone();
@@ -102,7 +152,61 @@ pub fn open(source: DescriptionSource, fallback_title: &str) {
         state.max_scroll = 0;
         state.request_id
     };
-    tokio::spawn(async move { fetch(request_id, key, source, fallback_title.to_string()) });
+    // dedicated OS thread with its own single-thread runtime instead of
+    // tokio::spawn: the TUI event loop blocks a worker with crossterm's
+    // 16ms poll and never yields, and on 2-core machines spawned tasks were
+    // observed never getting polled. a plain thread + block_on is immune to
+    // all of that — the fetch only talks to global state (see the lock
+    // helpers) and its own HTTP client, so it needs nothing from the app
+    // runtime.
+    std::thread::Builder::new()
+        .name("description-fetch".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("description fetch runtime");
+            runtime.block_on(fetch(request_id, key, source, fallback_title));
+        })
+        .expect("description fetch thread");
+    tracing::info!("Description fetch thread started");
+}
+
+fn state_gallery_thumbs(gallery: &[GalleryItem]) -> impl Iterator<Item = String> + '_ {
+    gallery.iter().map(|item| item.thumb.clone())
+}
+
+// gallery: modrinth ships screenshots inside the project response (the
+// standalone /gallery routes are write-only, and curseforge's core api has
+// no gallery read at all — its screenshots are embedded in the description
+// HTML, which normalize_html already renders as images). appended to the
+// body as a markdown section so it flows through the same document/image
+// pipeline as everything else, sorted by the author's ordering.
+fn append_gallery(body: String, gallery: &[crate::net::modrinth::GalleryImage]) -> String {
+    if gallery.is_empty() {
+        return body;
+    }
+    let mut images: Vec<&crate::net::modrinth::GalleryImage> = gallery.iter().collect();
+    images.sort_by_key(|image| image.ordering);
+
+    let mut section = String::from("\n\n## Gallery\n\n");
+    for image in images {
+        let url = image.raw_url.as_deref().unwrap_or(&image.url);
+        if !image.title.is_empty() {
+            section.push_str(&format!("### {}\n\n", image.title));
+        }
+        if !image.description.is_empty() {
+            section.push_str(&image.description);
+            section.push_str("\n\n");
+        }
+        let alt = if image.title.is_empty() {
+            "gallery image"
+        } else {
+            &image.title
+        };
+        section.push_str(&format!("![{alt}]({url})\n\n"));
+    }
+    format!("{body}{section}")
 }
 
 // fetch hardening: Document::new runs in a spawned task, where a panic
@@ -127,15 +231,30 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
     tracing::info!("Fetching description for {key}");
     let client = HttpClient::shared();
 
-    // body: cache hit is instant; miss goes to the catalog API
-    let (title, body) = match BODY_CACHE.lock().ok().and_then(|c| c.get(&key).cloned()) {
+    // body: cache hit is instant; miss goes to the catalog API. clone out
+    // of the cache first — the guard can't be held across the await below.
+    let cached = lock_bodies().get(&key).cloned();
+    let (title, body, mut gallery) = match cached {
         Some(cached) => cached,
         None => {
             let result = match &source {
                 DescriptionSource::Modrinth { project_id } => {
                     crate::net::modrinth::get_project(&client, project_id)
                         .await
-                        .map(|p| (p.title, p.body))
+                        .map(|p| {
+                            let gallery = p
+                                .gallery
+                                .iter()
+                                .map(|g| GalleryItem {
+                                    // url is a ~350px webp thumbnail, raw_url
+                                    // the full-resolution original
+                                    thumb: g.url.clone(),
+                                    raw: g.raw_url.clone().unwrap_or_else(|| g.url.clone()),
+                                    title: g.title.clone(),
+                                })
+                                .collect();
+                            (p.title, append_gallery(p.body, &p.gallery), gallery)
+                        })
                         .map_err(|e| e.to_string())
                 }
                 DescriptionSource::CurseForge { mod_id } => {
@@ -146,15 +265,13 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
                         .to_string();
                     crate::net::curseforge::get_description(&client, &api_key, *mod_id)
                         .await
-                        .map(|body| (fallback_title.clone(), body))
+                        .map(|body| (fallback_title.clone(), body, Vec::new()))
                         .map_err(|e| e.to_string())
                 }
             };
             match result {
                 Ok(pair) => {
-                    if let Ok(mut cache) = BODY_CACHE.lock() {
-                        cache.insert(key.clone(), pair.clone());
-                    }
+                    lock_bodies().insert(key.clone(), pair.clone());
                     pair
                 }
                 Err(e) => {
@@ -164,6 +281,22 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
             }
         }
     };
+
+    // curseforge has no gallery endpoint; its description-embedded images
+    // are the closest thing, so let the grid show those (untitled).
+    if gallery.is_empty()
+        && let Ok(document) = build_document(&title, &body)
+    {
+        gallery = document
+            .image_urls()
+            .into_iter()
+            .map(|url| GalleryItem {
+                thumb: url.clone(),
+                raw: url,
+                title: String::new(),
+            })
+            .collect();
+    }
 
     let mut document = match build_document(&title, &body) {
         Ok(document) => document,
@@ -176,25 +309,37 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
 
     // satisfy what we can from the image cache before fetching the rest
     let mut missing: Vec<String> = Vec::new();
-    if let Ok(cache) = IMAGE_CACHE.lock() {
-        for url in document.image_urls() {
+    {
+        let cache = lock_images();
+        for url in document
+            .image_urls()
+            .into_iter()
+            .chain(state_gallery_thumbs(&gallery))
+        {
             match cache.get(&(key.clone(), url.clone())) {
                 Some(image) => document.set_image(&url, Ok(image.clone())),
                 None => missing.push(url),
             }
         }
-    } else {
-        missing = document.image_urls();
     }
+    // grid thumbnails first: they're tiny and the gallery is what the user
+    // opens first; the big full-res description images can trickle in after.
+    let thumbs: Vec<String> = state_gallery_thumbs(&gallery).collect();
+    missing.sort_by_key(|url| !thumbs.contains(url));
     missing.sort();
     missing.dedup();
 
     apply(request_id, &key, |state| {
-        state.title = title.clone();
+        state.title = title;
         state.document = Some(document);
         state.error = None;
         state.scroll = 0;
         state.max_scroll = 0;
+        state.gallery = gallery;
+        state.gallery_open = false;
+        state.gallery_idx = 0;
+        state.gallery_scroll_row = 0;
+        state.preview_open = false;
     });
     tracing::info!("Description for {key} ready ({} image(s))", missing.len());
     if missing.is_empty() {
@@ -230,10 +375,8 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
     }
     while let Some(task) = tasks.join_next().await {
         let Ok((url, result)) = task else { continue };
-        if let Ok(image) = &result
-            && let Ok(mut cache) = IMAGE_CACHE.lock()
-        {
-            cache.insert((key.clone(), url.clone()), image.clone());
+        if let Ok(image) = &result {
+            lock_images().insert((key.clone(), url.clone()), image.clone());
         }
         apply(request_id, &key, |state| {
             if let Some(document) = state.document.as_mut() {
@@ -248,11 +391,8 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
 // still showing this request's project (dropped otherwise, like rmcl's
 // request_id filter).
 fn apply(request_id: u64, key: &str, f: impl FnOnce(&mut DescriptionState)) {
-    if let Ok(mut state) = DESCRIPTION_STATE.lock()
-        && state.open
-        && state.request_id == request_id
-        && state.source_key == key
-    {
+    let mut state = lock_state();
+    if state.open && state.request_id == request_id && state.source_key == key {
         f(&mut state);
     }
 }
@@ -262,34 +402,124 @@ fn apply(request_id: u64, key: &str, f: impl FnOnce(&mut DescriptionState)) {
 // render_content() with its content area after drawing its frame. no
 // separate overlay popup.
 
-// closes the description view and scrolls it; returns true while still open.
+/// what the description view did with a key.
+/// one gallery entry: `thumb` (small, for the grid) and `raw` (full
+/// resolution, for the preview overlay). modrinth provides both; for
+/// curseforge they're the same url (description-embedded images).
+#[derive(Clone)]
+pub struct GalleryItem {
+    pub thumb: String,
+    pub raw: String,
+    pub title: String,
+}
+
+pub enum KeyAction {
+    /// consumed by the description view (scroll, close, ignored).
+    Consumed,
+    /// close the description and re-dispatch the key to the underlying
+    /// browse popup — `v` (versions) and `i` (install latest) act on the
+    /// project the popup still has selected.
+    Passthrough,
+}
+
+// closes the description view and scrolls it; see KeyAction for the return.
 // routed from input.rs before the host popup sees any keys, so the view is
 // modal over the browse popup it replaced.
-pub fn handle_key(key_event: &crossterm::event::KeyEvent) -> bool {
+pub fn handle_key(key_event: &crossterm::event::KeyEvent) -> KeyAction {
     use crossterm::event::KeyCode;
-    let mut state = match DESCRIPTION_STATE.lock() {
-        Ok(state) => state,
-        Err(_) => return false,
-    };
+    let mut state = lock_state();
+    let gallery_len = state.gallery.len();
+
+    // full-image preview: any of the close keys steps back to the grid.
+    if state.preview_open {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('b') | KeyCode::Char('q') => {
+                state.preview_open = false;
+            }
+            _ => {}
+        }
+        return KeyAction::Consumed;
+    }
+
+    // gallery grid: navigate thumbnails, Enter previews, b/Esc/g back.
+    if state.gallery_open {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('g') => {
+                state.gallery_open = false;
+                state.gallery_idx = 0;
+                state.gallery_scroll_row = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                state.gallery_idx = (state.gallery_idx + 1).min(gallery_len.saturating_sub(1));
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                state.gallery_idx = state.gallery_idx.saturating_sub(1);
+            }
+            KeyCode::PageDown => {
+                state.gallery_idx =
+                    (state.gallery_idx + GRID_PAGE).min(gallery_len.saturating_sub(1));
+            }
+            KeyCode::PageUp => {
+                state.gallery_idx = state.gallery_idx.saturating_sub(GRID_PAGE);
+            }
+            KeyCode::Enter | KeyCode::Char('l') if gallery_len > 0 => {
+                state.preview_open = true;
+            }
+            // v/i still pass through to the popup's own handlers.
+            KeyCode::Char('i') | KeyCode::Char('v') => {
+                state.gallery_open = false;
+                state.gallery_idx = 0;
+                state.gallery_scroll_row = 0;
+                return KeyAction::Passthrough;
+            }
+            _ => {}
+        }
+        return KeyAction::Consumed;
+    }
+
     match key_event.code {
-        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => state.open = false,
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => {
+            state.open = false;
+            KeyAction::Consumed
+        }
+        // hand these back to the browse popup: it still has this project
+        // selected, so its own i/v arms do the right thing.
+        KeyCode::Char('i') | KeyCode::Char('v') => {
+            state.open = false;
+            KeyAction::Passthrough
+        }
+        KeyCode::Char('g') if gallery_len > 0 => {
+            state.gallery_open = true;
+            state.gallery_idx = 0;
+            state.gallery_scroll_row = 0;
+            KeyAction::Consumed
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             state.scroll = state.scroll.saturating_add(1).min(state.max_scroll);
+            KeyAction::Consumed
         }
         KeyCode::Char('k') | KeyCode::Up => {
             state.scroll = state.scroll.saturating_sub(1);
+            KeyAction::Consumed
         }
         KeyCode::PageDown | KeyCode::Char('d') => {
             state.scroll = state.scroll.saturating_add(10).min(state.max_scroll);
+            KeyAction::Consumed
         }
         KeyCode::PageUp | KeyCode::Char('u') => {
             state.scroll = state.scroll.saturating_sub(10);
+            KeyAction::Consumed
         }
-        KeyCode::Char('g') | KeyCode::Home => state.scroll = 0,
-        KeyCode::Char('G') | KeyCode::End => state.scroll = state.max_scroll,
-        _ => {}
+        KeyCode::Char('G') | KeyCode::End => {
+            state.scroll = state.max_scroll;
+            KeyAction::Consumed
+        }
+        KeyCode::Home => {
+            state.scroll = 0;
+            KeyAction::Consumed
+        }
+        _ => KeyAction::Consumed,
     }
-    state.open
 }
 
 /// current description title, for the host popup's title bar.
@@ -302,11 +532,25 @@ pub fn title() -> String {
 
 /// keybind footer while the description view is showing.
 pub fn keybinds() -> ratatui::text::Line<'static> {
+    let state = lock_state();
+    if state.preview_open {
+        return keybind_line(&[("b/Esc", " close")]);
+    }
+    if state.gallery_open {
+        return keybind_line(&[
+            ("j/k", " move"),
+            ("PgUp/PgDn", " page"),
+            ("Enter", " view"),
+            ("b/Esc", " back"),
+        ]);
+    }
     keybind_line(&[
         ("j/k", " scroll"),
         ("PgUp/PgDn", " page"),
-        ("g/G", " top/end"),
-        ("h/Esc", " back"),
+        ("g", " gallery"),
+        ("v", " versions"),
+        ("i", " install latest"),
+        ("b/Esc", " back"),
     ])
 }
 
@@ -314,11 +558,17 @@ pub fn keybinds() -> ratatui::text::Line<'static> {
 /// called by the host browse popup after its frame is drawn —
 /// markdown::render needs &mut Frame for the inline images.
 pub fn render_content(frame: &mut Frame, inner: Rect, picker: &ratatui_image::picker::Picker) {
-    let mut state = match DESCRIPTION_STATE.lock() {
-        Ok(state) => state,
-        Err(_) => return,
-    };
+    let mut state = lock_state();
     let theme = THEME.as_ref();
+
+    if state.preview_open {
+        render_preview(frame, inner, picker, &mut state);
+        return;
+    }
+    if state.gallery_open {
+        render_gallery(frame, inner, picker, &mut state);
+        return;
+    }
 
     if let Some(error) = &state.error {
         Paragraph::new(error.as_str())
@@ -344,4 +594,206 @@ pub fn render_content(frame: &mut Frame, inner: Rect, picker: &ratatui_image::pi
     };
     state.scroll = scroll;
     state.max_scroll = height;
+}
+
+// grid cell sizing, mirroring screenshots_grid's constraints.
+const TARGET_CELL_WIDTH: u16 = 34;
+const MIN_CELL_WIDTH: u16 = 24;
+const MAX_CELL_WIDTH: u16 = 52;
+// image rows + 1 caption row inside each cell
+const CELL_IMAGE_ROWS: u16 = 11;
+const CELL_CAPTION_ROWS: u16 = 1;
+const CELL_HEIGHT: u16 = CELL_IMAGE_ROWS + CELL_CAPTION_ROWS + 1;
+
+fn gallery_image(source_key: &str, url: &str) -> Option<image::DynamicImage> {
+    lock_images().get(&(source_key.to_string(), url.to_string())).cloned()
+}
+
+fn render_gallery(
+    frame: &mut Frame,
+    inner: Rect,
+    picker: &ratatui_image::picker::Picker,
+    state: &mut DescriptionState,
+) {
+    let theme = THEME.as_ref();
+    let total = state.gallery.len();
+    if total == 0 {
+        Paragraph::new("No gallery images.")
+            .style(Style::default().fg(theme.text_dim()))
+            .render(inner, frame.buffer_mut());
+        return;
+    }
+
+    let min_cols = (inner.width / MAX_CELL_WIDTH).max(1) as usize;
+    let max_cols = (inner.width / MIN_CELL_WIDTH).max(1) as usize;
+    let target_cols = (inner.width / TARGET_CELL_WIDTH).max(1) as usize;
+    let cols = target_cols.clamp(min_cols, max_cols);
+    let rows = (inner.height.saturating_sub(2) / CELL_HEIGHT).max(1) as usize;
+
+
+    // keep the selection inside the visible window
+    let sel_row = state.gallery_idx / cols;
+    let top_row = state.gallery_scroll_row;
+    let top_row = if sel_row < top_row {
+        sel_row
+    } else if sel_row >= top_row + rows {
+        sel_row + 1 - rows
+    } else {
+        top_row
+    };
+    state.gallery_scroll_row = top_row;
+
+    let theme2 = THEME.as_ref();
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = (top_row + r) * cols + c;
+            if idx >= total {
+                break;
+            }
+            let (thumb, title) = (
+                state.gallery[idx].thumb.clone(),
+                state.gallery[idx].title.clone(),
+            );
+            let is_selected = idx == state.gallery_idx;
+            let cell = Rect {
+                x: inner.x + c as u16 * (inner.width / cols as u16),
+                y: inner.y + r as u16 * CELL_HEIGHT,
+                width: inner.width / cols as u16,
+                height: CELL_HEIGHT,
+            };
+            if cell.width == 0 || cell.right() > inner.right() || cell.bottom() > inner.bottom() {
+                continue;
+            }
+
+            // selection frame
+            if is_selected {
+                Block::bordered()
+                    .border_style(Style::default().fg(theme2.accent()))
+                    .render(cell, frame.buffer_mut());
+            }
+
+            let image_area = Rect {
+                x: cell.x + 1,
+                y: cell.y + 1,
+                width: cell.width.saturating_sub(2),
+                height: CELL_IMAGE_ROWS,
+            };
+            let caption = if title.is_empty() {
+                format!("{} / {total}", idx + 1)
+            } else {
+                title.clone()
+            };
+            let caption_area = Rect {
+                x: cell.x + 1,
+                y: cell.y + 1 + CELL_IMAGE_ROWS,
+                width: cell.width.saturating_sub(2),
+                height: CELL_CAPTION_ROWS,
+            };
+            Paragraph::new(caption)
+                .style(Style::default().fg(if is_selected {
+                    theme2.text()
+                } else {
+                    theme2.text_dim()
+                }))
+                .render(caption_area, frame.buffer_mut());
+
+            // protocol built once per url, from the small thumbnail —
+            // cloning/encoding the full-res image per frame is what made
+            // the grid crawl.
+            if !state.gallery_protocols.contains_key(&thumb) {
+                if let Some(image) = gallery_image(&state.source_key, &thumb) {
+                    let protocol = picker.new_resize_protocol(image);
+                    state.gallery_protocols.insert(thumb.clone(), protocol);
+                }
+            }
+            match state.gallery_protocols.get_mut(&thumb) {
+                Some(protocol) => {
+                    let widget = StatefulImage::default().resize(Resize::Fit(None));
+                    StatefulWidget::render(widget, image_area, frame.buffer_mut(), protocol);
+                }
+                None => {
+                    Paragraph::new("loading...")
+                        .style(Style::default().fg(theme2.text_dim()))
+                        .render(image_area, frame.buffer_mut());
+                }
+            }
+        }
+    }
+
+    // footer: selected caption + position
+    let sel_title = state.gallery[state.gallery_idx].title.clone();
+    let footer = if sel_title.is_empty() {
+        format!("{} / {total}", state.gallery_idx + 1)
+    } else {
+        format!("{}  \u{b7}  {} / {total}", sel_title, state.gallery_idx + 1)
+    };
+    Paragraph::new(footer)
+        .style(Style::default().fg(theme.text_dim()))
+        .render(
+            Rect {
+                x: inner.x,
+                y: inner.bottom().saturating_sub(1),
+                width: inner.width,
+                height: 1,
+            },
+            frame.buffer_mut(),
+        );
+}
+
+fn render_preview(
+    frame: &mut Frame,
+    inner: Rect,
+    picker: &ratatui_image::picker::Picker,
+    state: &mut DescriptionState,
+) {
+    let theme = THEME.as_ref();
+    Clear.render(inner, frame.buffer_mut());
+    let Some(item) = state.gallery.get(state.gallery_idx) else {
+        return;
+    };
+    let (raw, title) = (item.raw.clone(), item.title.clone());
+    let block = Block::bordered()
+        .title(title.clone())
+        .border_style(Style::default().fg(theme.accent()));
+    let image_area = {
+        let full = block.inner(inner);
+        Rect {
+            x: full.x,
+            y: full.y,
+            width: full.width,
+            height: full.height.saturating_sub(1),
+        }
+    };
+    block.render(inner, frame.buffer_mut());
+
+    if !state.gallery_protocols.contains_key(&raw) {
+        if let Some(image) = gallery_image(&state.source_key, &raw) {
+            let protocol = picker.new_resize_protocol(image);
+            state.gallery_protocols.insert(raw.clone(), protocol);
+        }
+    }
+    match state.gallery_protocols.get_mut(&raw) {
+        Some(protocol) => {
+            let widget = StatefulImage::default().resize(Resize::Fit(None));
+            StatefulWidget::render(widget, image_area, frame.buffer_mut(), protocol);
+        }
+        None => {
+            Paragraph::new("loading...")
+                .style(Style::default().fg(theme.text_dim()))
+                .render(image_area, frame.buffer_mut());
+        }
+    }
+
+    let hint = Paragraph::new(format!("{} / {}", state.gallery_idx + 1, state.gallery.len()))
+        .style(Style::default().fg(theme.text_dim()))
+        .alignment(ratatui::layout::Alignment::Center);
+    hint.render(
+        Rect {
+            x: inner.x,
+            y: inner.bottom().saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+        frame.buffer_mut(),
+    );
 }

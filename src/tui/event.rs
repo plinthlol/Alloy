@@ -65,12 +65,19 @@ impl App {
         Ok(())
     }
 
-    // polls for input with a 16ms timeout (~60fps). only key presses are handled,
-    // releases and repeats are ignored thanks to the enhanced keyboard protocol
+    // polls for input with a 16ms timeout (~60fps). press + repeat are both
+    // handled — dropping repeat made held-down vim keys/arrow keys feel
+    // glitchy (one step per physical mash instead of a smooth scroll).
+    // releases are still ignored thanks to the enhanced keyboard protocol.
     fn handle_events(&mut self) -> color_eyre::Result<bool> {
         match crossterm::event::poll(Duration::from_millis(16)) {
             Ok(true) => match event::read() {
-                Ok(Event::Key(key_event)) if key_event.kind == KeyEventKind::Press => {
+                Ok(Event::Key(key_event))
+                    if matches!(
+                        key_event.kind,
+                        KeyEventKind::Press | KeyEventKind::Repeat
+                    ) =>
+                {
                     self.handle_key_event(key_event)
                         .wrap_err_with(|| format!("handling key event failed:\n{key_event:#?}"))?;
                     Ok(true)

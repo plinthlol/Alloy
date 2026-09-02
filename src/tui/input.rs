@@ -55,12 +55,14 @@ impl App {
             }
         }
 
-        // the project description popup is modal over the browse popups —
-        // when it's open it eats every keypress (scroll/close) before the
-        // underlying popup or area sees anything.
+        // the project description view is modal over the browse popups —
+        // when it's open it eats keypresses (scroll/close), except i/v which
+        // close it and pass through to the popup's own handlers.
         if description::is_open() {
-            description::handle_key(&key_event);
-            return Ok(());
+            match description::handle_key(&key_event) {
+                description::KeyAction::Consumed => return Ok(()),
+                description::KeyAction::Passthrough => {} // fall through
+            }
         }
 
         if self.focused == FocusedArea::ConfirmDelete {

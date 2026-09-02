@@ -429,7 +429,7 @@ fn handle_version_key(state: &mut ContentBrowseState, key_event: &KeyEvent) {
 
     match key_event.code {
         KeyCode::Esc => close(state),
-        KeyCode::Left | KeyCode::Char('h') => state.step = BrowseStep::Search,
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => state.step = BrowseStep::Search,
         KeyCode::Char('j') | KeyCode::Down if version_count > 0 => {
             state.version_idx = (state.version_idx + 1).min(version_count.saturating_sub(1));
         }

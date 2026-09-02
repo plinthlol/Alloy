@@ -187,15 +187,15 @@ fn step_keybinds(state: &WizardState) -> ratatui::text::Line<'static> {
     match state.step {
         WizardStep::Mode => keybind_line(&[("j/k", " choose"), ("Enter", " select")]),
         WizardStep::Name => keybind_line(&[("Enter", " continue")]),
-        WizardStep::Loader => keybind_line(&[("h", " back"), ("Enter", " select")]),
+        WizardStep::Loader => keybind_line(&[("b", " back"), ("Enter", " select")]),
         WizardStep::Version => keybind_line(&[
             ("/", " search"),
             ("s", " snap"),
-            ("h", " back"),
+            ("b", " back"),
             ("Enter", " select"),
         ]),
-        WizardStep::LoaderVersion => keybind_line(&[("h", " back"), ("Enter", " select")]),
-        WizardStep::Confirm => keybind_line(&[("h", " back"), ("Enter", " create")]),
+        WizardStep::LoaderVersion => keybind_line(&[("b", " back"), ("Enter", " select")]),
+        WizardStep::Confirm => keybind_line(&[("b", " back"), ("Enter", " create")]),
         WizardStep::ModpackBrowse => {
             if state.modpack_query_focused {
                 // search is live now - Enter just commits focus back to the
@@ -212,7 +212,7 @@ fn step_keybinds(state: &WizardState) -> ratatui::text::Line<'static> {
                 ])
             }
         }
-        WizardStep::ModpackVersion => keybind_line(&[("h", " back"), ("Enter", " select")]),
+        WizardStep::ModpackVersion => keybind_line(&[("b", " back"), ("Enter", " select")]),
         WizardStep::ModpackConfirm => keybind_line(&[("←", " back"), ("Enter", " install")]),
     }
 }

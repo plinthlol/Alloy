@@ -209,6 +209,26 @@ pub struct ProjectBody {
     pub description: String,
     #[serde(default)]
     pub body: String,
+    // project screenshots. the standalone /gallery routes are write-only
+    // (auth'd uploads) — reads come embedded here.
+    #[serde(default)]
+    pub gallery: Vec<GalleryImage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GalleryImage {
+    pub url: String,
+    // full-resolution counterpart to `url` (a ~350px webp thumbnail)
+    #[serde(default)]
+    pub raw_url: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub featured: bool,
+    #[serde(default)]
+    pub ordering: i64,
 }
 
 pub async fn get_project(

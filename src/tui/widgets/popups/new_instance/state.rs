@@ -509,7 +509,7 @@ fn handle_version_key(
         KeyCode::Esc => {
             close_popup(state, instances_state);
         }
-        KeyCode::Left | KeyCode::Char('h') if !state.version_search.active => {
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') if !state.version_search.active => {
             state.step = WizardStep::Name;
         }
         KeyCode::Char('j') | KeyCode::Down if visible_count > 0 => {
@@ -554,7 +554,7 @@ fn handle_loader_key(
 ) {
     match key_event.code {
         KeyCode::Esc => close_popup(state, instances_state),
-        KeyCode::Left | KeyCode::Char('h') => state.step = WizardStep::Version,
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => state.step = WizardStep::Version,
         KeyCode::Char('j') | KeyCode::Down => {
             state.loader_idx = (state.loader_idx + 1).min(4);
         }
@@ -596,7 +596,7 @@ fn handle_loader_version_key(
 
     match key_event.code {
         KeyCode::Esc => close_popup(state, instances_state),
-        KeyCode::Left | KeyCode::Char('h') => state.step = WizardStep::Loader,
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => state.step = WizardStep::Loader,
         KeyCode::Char('j') | KeyCode::Down if version_count > 0 => {
             state.loader_version_idx =
                 (state.loader_version_idx + 1).min(version_count.saturating_sub(1));
@@ -621,7 +621,7 @@ fn handle_confirm_key(
 ) {
     match key_event.code {
         KeyCode::Esc => close_popup(state, instances_state),
-        KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => {
             if state.selected_loader() == ModLoader::Vanilla {
                 state.step = WizardStep::Loader;
             } else {
@@ -814,7 +814,7 @@ fn handle_modpack_version_key(
 
     match key_event.code {
         KeyCode::Esc => close_popup(state, instances_state),
-        KeyCode::Left | KeyCode::Char('h') => state.step = WizardStep::ModpackBrowse,
+        KeyCode::Left | KeyCode::Char('b') | KeyCode::Char('h') => state.step = WizardStep::ModpackBrowse,
         KeyCode::Char('j') | KeyCode::Down if version_count > 0 => {
             state.modpack_version_idx =
                 (state.modpack_version_idx + 1).min(version_count.saturating_sub(1));

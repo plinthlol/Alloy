@@ -21,6 +21,12 @@ eula = false
 name = "alloysh"
 path = "src/main.rs"
 
+# dev builds only need line tables: full debug info was the bulk of the
+# 350MB+ target dir and most of the link time. backtraces keep working;
+# step-through debugging in a debugger won't (switch with `--debuginfo`).
+[profile.dev]
+debug = "line-tables-only"
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4.39", features = ["serde"] }

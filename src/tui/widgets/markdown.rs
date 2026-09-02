@@ -1597,6 +1597,16 @@ fn render_image_row(
         let item_end = item_y.saturating_add(usize::from(*height));
         let viewport_start = hidden_top;
         let viewport_end = hidden_top.saturating_add(usize::from(area.height));
+        // kick off preparation for off-screen rows too: prepare is a
+        // background thread, so by the time the user scrolls here the
+        // terminal-encoded image is ready instead of popping in late.
+        if item_end <= viewport_start || item_y >= viewport_end {
+            if let Some(image) = images.get_mut(&reference.url) {
+                ensure_image_prepared(image, reference, *width, *height, picker, pending);
+            }
+            x = x.saturating_add(*width).saturating_add(1);
+            continue;
+        }
         if item_end > viewport_start && item_y < viewport_end {
             let item_hidden_top = viewport_start.saturating_sub(item_y);
             let visible_y = item_y.saturating_sub(viewport_start);
@@ -1629,6 +1639,43 @@ fn render_image_row(
             }
         }
         x = x.saturating_add(*width).saturating_add(1);
+    }
+}
+
+// spawns the background preparation for an image at the size it will be
+// drawn at, without touching the viewport — used for off-screen rows so
+// images are ready before they scroll into view.
+fn ensure_image_prepared(
+    image: &mut DocumentImage,
+    reference: &ImageReference,
+    width: u16,
+    height: u16,
+    picker: &ratatui_image::picker::Picker,
+    pending: &Arc<Mutex<Vec<PreparedImageResult>>>,
+) {
+    let ImageLoad::Ready(decoded) = &image.load else {
+        return;
+    };
+    let key = ImageRenderKey {
+        width,
+        height,
+        protocol: picker.protocol_type(),
+        mode: crate::config::SETTINGS.ui.image_protocol,
+    };
+    if image
+        .prepared
+        .as_ref()
+        .is_none_or(|(prepared_key, _)| *prepared_key != key)
+        && image.pending != Some(key)
+    {
+        image.pending = Some(key);
+        prepare_image(
+            reference.url.clone(),
+            decoded.clone(),
+            key,
+            picker.clone(),
+            pending.clone(),
+        );
     }
 }
 
