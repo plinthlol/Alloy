@@ -12,6 +12,7 @@ pub mod browse_step;
 pub mod content;
 pub mod instances;
 pub mod logs_viewer;
+pub mod markdown;
 pub mod popups;
 pub mod screenshots_grid;
 pub mod search;

@@ -15,6 +15,8 @@ use java_provision::ImageType;
 use reqwest::Client;
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use sha1::{Digest, Sha1};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -42,12 +44,24 @@ impl Default for HttpClient {
     }
 }
 
+// hard cap for web-fetched assets (inline project images). guards against
+// a hostile/huge URL burning memory in the markdown description view.
+pub const MAX_PROVIDER_ASSET_BYTES: usize = 16 * 1024 * 1024;
+
 impl HttpClient {
     pub fn new() -> Self {
         let user_agent = format!("alloy/{} (Minecraft Launcher)", env!("CARGO_PKG_VERSION"));
         let client = Client::builder()
             .user_agent(user_agent.clone())
             .timeout(std::time::Duration::from_secs(30))
+            // send small requests (API JSON, headers) out immediately
+            // instead of letting Nagle's algorithm hold them for a
+            // coalescing window — a classic 40-200ms stall per call.
+            .tcp_nodelay(true)
+            // hold pooled keep-alive connections open longer than the 90s
+            // default, so a browse session's warmed connections survive
+            // pauses between searches/installs.
+            .pool_idle_timeout(std::time::Duration::from_secs(300))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(
@@ -58,6 +72,18 @@ impl HttpClient {
             });
         tracing::trace!("Created HTTP client with user-agent '{}'", user_agent);
         Self { inner: client }
+    }
+
+    // process-wide shared client for the hot UI paths (catalog searches,
+    // version listings, single-file installs). reqwest pools connections
+    // per-client, so a fresh client per fetch re-pays TCP+TLS on every
+    // call — sharing one means the search warms a keep-alive connection
+    // that the version fetch (and the next search) reuses for free. cheap
+    // to clone (the pool is internally Arc'd), so callers keep local
+    // bindings like with new().
+    pub fn shared() -> Self {
+        static SHARED: LazyLock<HttpClient> = LazyLock::new(HttpClient::new);
+        SHARED.clone()
     }
 
     pub async fn get(&self, url: &str) -> Result<reqwest::Response, NetError> {
@@ -104,6 +130,33 @@ impl HttpClient {
         }
         tracing::trace!("HTTP GET {} succeeded with {}", url, response.status());
         Ok(response)
+    }
+
+    // like get_bytes, but rejects bodies over `limit` bytes — both via the
+    // declared content-length up front and while streaming chunks, so a
+    // server that lies about the length still can't blow the cap.
+    pub async fn get_bytes_limited(&self, url: &str, limit: usize) -> Result<Vec<u8>, NetError> {
+        get_with_retry(self, url, move |mut response| async move {
+            if response
+                .content_length()
+                .is_some_and(|length| length > limit as u64)
+            {
+                return Err(NetError::Parse(format!(
+                    "Response exceeds the {limit}-byte limit"
+                )));
+            }
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                if bytes.len().saturating_add(chunk.len()) > limit {
+                    return Err(NetError::Parse(format!(
+                        "Response exceeds the {limit}-byte limit"
+                    )));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(bytes)
+        })
+        .await
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T, NetError> {
@@ -299,6 +352,38 @@ async fn download_file_once(
             }
             Err(e)
         }
+    }
+}
+
+// verifies `path`'s contents against an expected sha1 hex digest. an empty
+// expected digest skips verification (defensive — some manifests omit it).
+// used by the mojang/modrinth download paths so a truncated or corrupted
+// file never lands in the cache as good: matching is done on the full
+// digest, compared case-insensitively since some sources pad/uppercase.
+pub async fn verify_sha1(path: &Path, expected: &str) -> Result<(), NetError> {
+    let bytes = tokio::fs::read(path).await?;
+    verify_bytes_sha1(&bytes, expected)
+}
+
+// in-memory counterpart to verify_sha1, for payloads already held in RAM
+// (e.g. the asset index fetched via get_json_with_raw).
+pub fn verify_bytes_sha1(bytes: &[u8], expected: &str) -> Result<(), NetError> {
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let mut hasher = Sha1::new();
+    hasher.update(bytes);
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(NetError::Parse(format!(
+            "sha1 mismatch: expected {expected}, got {actual}"
+        )))
     }
 }
 

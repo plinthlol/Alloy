@@ -42,7 +42,7 @@ impl InstanceManager {
         let manager = InstanceManager {
             instances_dir: instances_dir.into(),
             meta_dir: meta_dir.into(),
-            client: crate::net::HttpClient::new(),
+            client: crate::net::HttpClient::shared(),
         };
         tracing::trace!(
             "Created InstanceManager with instances_dir={} meta_dir={}",

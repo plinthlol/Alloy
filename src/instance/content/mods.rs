@@ -388,7 +388,7 @@ pub(crate) fn make_icon_pixels(
     Some(make_icon_pixels_from_image(&img, width, height))
 }
 
-pub(crate) fn make_icon_pixels_from_image(
+pub fn make_icon_pixels_from_image(
     img: &image::DynamicImage,
     width: u16,
     height: u16,
@@ -424,7 +424,7 @@ pub(crate) fn make_icon_pixels_from_image(
     rows
 }
 
-pub(crate) fn make_icon_quadrants_from_image(
+pub fn make_icon_quadrants_from_image(
     img: &image::DynamicImage,
     width: u16,
     height: u16,
@@ -540,7 +540,7 @@ pub(crate) fn unknown_world_bytes() -> &'static [u8] {
 // unknown_mod.png. only reached if that asset itself fails to decode (see
 // fallback_icon_from_asset) — the normal path runs unknown_mod_bytes()
 // through make_icon_pixels directly, at the same 6x3 size real icons use.
-pub(super) fn fallback_icon() -> Vec<Vec<IconCell>> {
+pub fn fallback_icon() -> Vec<Vec<IconCell>> {
     fallback_icon_from_asset(unknown_mod_bytes(), 6, 3)
 }
 

@@ -18,7 +18,10 @@ use ratatui_image::protocol::StatefulProtocol;
 
 // icons render at a handful of terminal cells — no point keeping (or
 // transferring, for pixel-shipping protocols like Sixel/iTerm2) more.
-const ICON_SIDE_PX: u32 = 96;
+// 192px keeps the thumbnails sharp at the current 3-row render height
+// (and its ~6x3 cell area) even on high-DPI terminals where each cell
+// covers more pixels.
+const ICON_SIDE_PX: u32 = 192;
 // caps in-flight fetches. a 40-hit search result requests every visible
 // icon as it scrolls into view; without a cap that's 40 connections
 // competing with the popup's own search/version calls.
@@ -273,7 +276,7 @@ impl WebIconCache {
             // resize + re-encode to a small PNG in one blocking task and
             // write *that* — not the raw bytes. decode+resize is the
             // expensive part, so doing it at fetch time means a hit only
-            // decodes a ~2KB thumbnail, and the budget holds ~10x more
+            // decodes a small thumbnail, and the budget holds far more
             // thumbnails than originals.
             let fetched = match ICON_HTTP.get_bytes(&url_owned).await {
                 Ok(bytes) => bytes,

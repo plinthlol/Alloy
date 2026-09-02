@@ -20,11 +20,11 @@ use ratatui::{
 use ratatui_image::{Resize, StatefulImage};
 use tui_prompts::{State as PromptState, TextState};
 
-// every search-result row is 2 content lines (title+meta, then description)
-// plus one blank spacer so rows don't run into each other. icons are
-// sized/drawn against TEXT_LINES (content only) so they stay proportioned
-// to the text instead of stretching into the spacer.
-const TEXT_LINES: u16 = 2;
+// every search-result row is 3 content lines (title, author+downloads,
+// description) plus one blank spacer so rows don't run into each other.
+// icons are sized/drawn against TEXT_LINES (content only) so they stay
+// proportioned to the text instead of stretching into the spacer.
+const TEXT_LINES: u16 = 3;
 const ROW_LINES: u16 = TEXT_LINES + 1;
 
 /// copy that differs per content kind (mod / resource pack / modpack).
@@ -160,6 +160,17 @@ pub fn render_search_step(
                         Line::from(vec![
                             Span::raw(icon_pad.clone()),
                             Span::styled(
+                                format!(
+                                    "by {}  \u{b7}  {} downloads",
+                                    hit.author(),
+                                    crate::util::format_count(hit.downloads())
+                                ),
+                                Style::default().fg(theme.text_dim()),
+                            ),
+                        ]),
+                        Line::from(vec![
+                            Span::raw(icon_pad.clone()),
+                            Span::styled(
                                 truncate_desc(hit.description(), 120),
                                 Style::default().fg(theme.text_dim()),
                             ),
@@ -248,19 +259,36 @@ pub fn render_version_step(
                 .enumerate()
                 .map(|(i, v)| {
                     let is_selected = i == version_idx;
+                    // big text is the Minecraft version (ModpackVersionHit::label);
+                    // the release's own name and channel live on the dim line.
+                    let mut meta = vec![Span::styled(
+                        v.version_name(),
+                        Style::default().fg(theme.text_dim()),
+                    )];
+                    if let Some(channel) = v.channel() {
+                        meta.push(Span::styled(
+                            " \u{b7} ",
+                            Style::default().fg(theme.text_dim()),
+                        ));
+                        meta.push(Span::styled(
+                            channel,
+                            Style::default().fg(theme.warning()).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    meta.push(Span::styled(
+                        " \u{b7} ",
+                        Style::default().fg(theme.text_dim()),
+                    ));
+                    meta.push(Span::styled(
+                        v.loaders(),
+                        Style::default().fg(theme.text_dim()),
+                    ));
                     let lines = vec![
                         Line::from(Span::styled(
                             v.label(),
                             browse_list::title_style(theme, source_accent, is_selected),
                         )),
-                        Line::from(Span::styled(
-                            format!("MC: {}   Loader: {}", v.game_versions(), v.loaders()),
-                            Style::default().fg(theme.text_dim()),
-                        )),
-                        // blank spacer, same reasoning as render_search_step:
-                        // keeps a long version list from reading as one
-                        // unbroken block.
-                        Line::from(""),
+                        Line::from(meta),
                     ];
                     browse_list::row(theme, source_accent, i, is_selected, lines)
                 })

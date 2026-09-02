@@ -7,7 +7,10 @@ pub mod resource_packs;
 pub mod worlds;
 
 pub use mods::scan_one_mod;
-pub use mods::{ContentEntry, scan_mods, toggle_entry};
+pub use mods::{
+    ContentEntry, IconCell, fallback_icon, make_icon_pixels_from_image, make_icon_quadrants_from_image,
+    scan_mods, toggle_entry,
+};
 pub use resource_packs::{scan_one_resource_pack, scan_resource_packs};
 pub use worlds::{scan_one_world, scan_worlds};
 

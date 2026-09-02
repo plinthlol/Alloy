@@ -301,7 +301,7 @@ async fn replace_log4j_fixed(lib_dir: &Path, classpath: &mut [PathBuf]) {
             if let Some(parent) = fixed_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let client = crate::net::HttpClient::new();
+            let client = crate::net::HttpClient::shared();
             if let Err(e) = crate::net::download_file(&client, url, &fixed_path, |_, _| {}).await {
                 tracing::error!(
                     "Failed to download patched {old_name}: {e}, continuing with unpatched version"

@@ -8,6 +8,7 @@
 
 use crate::instance::models::ModLoader;
 use crate::net::curseforge;
+use crate::tui::widgets::popups::description;
 pub(crate) use crate::tui::widgets::popups::new_instance::{
     LoadState, ModpackHit, ModpackSource, ModpackVersionHit,
 };
@@ -273,12 +274,12 @@ fn handle_search_key(state: &mut ContentBrowseState, key_event: &KeyEvent) {
         // which not every keyboard/terminal sends reliably.
         KeyCode::Home | KeyCode::Char('h') => state.idx = 0,
         KeyCode::End if result_count > 0 => state.idx = result_count - 1,
-        // installs the newest compatible version of the highlighted hit
-        // without the Version screen — for mods this resolves the same
-        // game-version+loader list the Version step would show and takes
-        // its top entry. blocked while a lookup is already in flight.
+        // 'v' keeps the old Enter behavior (version list for the selected
+        // hit); Enter itself now opens the full project description — the
+        // rmcl-style markdown page with inline images. 'i' still installs
+        // the newest compatible version without opening either.
         KeyCode::Char('i') if !state.pending_install => install_latest(state),
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Char('v') => {
             if state.selected_hit().is_none() {
                 return;
             }
@@ -286,6 +287,18 @@ fn handle_search_key(state: &mut ContentBrowseState, key_event: &KeyEvent) {
             state.version_idx = 0;
             state.step = BrowseStep::Version;
             ensure_versions_loaded(state);
+        }
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            let Some(hit) = state.selected_hit().cloned() else {
+                return;
+            };
+            let source = match &hit {
+                ModpackHit::Modrinth(h) => description::DescriptionSource::Modrinth {
+                    project_id: h.project_id.clone(),
+                },
+                ModpackHit::CurseForge(m) => description::DescriptionSource::CurseForge { mod_id: m.id },
+            };
+            description::open(source, hit.title());
         }
         _ => {}
     }
@@ -317,7 +330,7 @@ fn install_latest(state: &mut ContentBrowseState) {
     crate::tui::progress::set_action(format!("Installing latest {}...", kind.label()));
     let state_arc = BROWSE_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let outcome: Result<ContentInstallSource, String> = match &hit {
             ModpackHit::Modrinth(h) => crate::net::modrinth::get_project_versions(
                 &client,
@@ -514,7 +527,7 @@ fn ensure_search(state: &mut ContentBrowseState) {
     state.idx = 0;
     let state_arc = BROWSE_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let outcome: Result<Vec<ModpackHit>, String> = match source {
             ModpackSource::Modrinth => crate::net::modrinth::search(
                 &client,
@@ -603,7 +616,7 @@ fn ensure_versions_loaded(state: &mut ContentBrowseState) {
     };
     let state_arc = BROWSE_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let outcome: Result<Vec<ModpackVersionHit>, String> = match query {
             VersionQuery::Modrinth(project_id) => crate::net::modrinth::get_project_versions(
                 &client,

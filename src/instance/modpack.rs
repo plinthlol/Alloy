@@ -98,7 +98,7 @@ pub async fn install_from_modrinth(
     version: &ProjectVersion,
     mut progress: impl FnMut(&str),
 ) -> Result<InstanceConfig, ModpackError> {
-    let client = HttpClient::new();
+    let client = HttpClient::shared();
 
     progress("Downloading modpack...");
     let tmp_dir = std::env::temp_dir().join(format!(
@@ -280,7 +280,7 @@ pub async fn install_from_curseforge(
     file: &curseforge::ModFile,
     mut progress: impl FnMut(&str),
 ) -> Result<InstanceConfig, ModpackError> {
-    let client = HttpClient::new();
+    let client = HttpClient::shared();
 
     progress("Downloading modpack...");
     let tmp_dir = std::env::temp_dir().join(format!(

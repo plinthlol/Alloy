@@ -37,7 +37,22 @@ pub async fn show() -> color_eyre::Result<()> {
         default_hook(info);
     }));
 
-    let mut terminal = ratatui::init();
+    // try_init instead of init: when stdin/stdout isn't a usable TTY (piped
+    // launch, IDE-embedded terminal, another instance still holding the tty),
+    // raw-mode setup fails with EIO — print a clean message and exit 0-style
+    // instead of panicking with a raw Os error.
+    let mut terminal = match ratatui::try_init() {
+        Ok(terminal) => terminal,
+        Err(e) => {
+            eprintln!("Failed to initialize terminal: {e}");
+            eprintln!(
+                "alloy needs an interactive terminal — run it directly in a terminal \
+                 emulator (not piped or IDE-embedded), and make sure no other \
+                 instance is still holding the terminal."
+            );
+            return Ok(());
+        }
+    };
 
     // opt into enhanced keyboard protocol to distinguish key press vs release
     let _ = crossterm::execute!(

@@ -4,6 +4,7 @@
 pub mod base;
 pub mod confirm;
 pub mod content_browse;
+pub mod description;
 pub mod error;
 pub mod global_settings;
 pub mod java_select;
@@ -54,6 +55,17 @@ pub fn top_right_rect(frame: Rect, inner_w: usize, inner_h: usize) -> Rect {
     }
 }
 
+// \u{23ce} (return symbol) instead of the word "Enter" — shorter, and reads
+// as the key it is. normalized centrally so every call site gets it without
+// remembering to spell the glyph.
+fn key_label(key: &str) -> &str {
+    if key == "Enter" {
+        "\u{23ce}"
+    } else {
+        key
+    }
+}
+
 pub fn keybind_line(binds: &[(&str, &str)]) -> ratatui::text::Line<'static> {
     use crate::config::theme::THEME;
     use ratatui::{
@@ -66,12 +78,15 @@ pub fn keybind_line(binds: &[(&str, &str)]) -> ratatui::text::Line<'static> {
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(theme.text());
 
+    // \u{23ce} (return symbol) instead of the word "Enter" — shorter, and
+    // reads as the key it is. normalized centrally so every call site gets
+    // it without remembering to spell the glyph.
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (i, (key, label)) in binds.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled("  ", label_style));
         }
-        spans.push(Span::styled(format!("[{}]", key), key_style));
+        spans.push(Span::styled(format!("[{}]", key_label(key)), key_style));
         if !label.is_empty() {
             spans.push(Span::styled(label.to_string(), label_style));
         }
@@ -110,8 +125,9 @@ pub fn keybind_lines_wrapped(
     let mut width: usize = 0;
 
     for (key, label) in binds.iter() {
+        let key = if *key == "Enter" { "\u{23ce}" } else { key };
         let sep_w = if spans.is_empty() { 0 } else { 2 };
-        let item_w = key.len() + 2 + label.len();
+        let item_w = key.chars().count() + 2 + label.len();
         let needed = sep_w + item_w;
 
         if width + needed > max_width as usize {

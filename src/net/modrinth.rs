@@ -56,6 +56,10 @@ pub struct ProjectVersion {
     pub version_number: String,
     pub game_versions: Vec<String>,
     pub loaders: Vec<String>,
+    // "release" | "beta" | "alpha" — surfaced as a channel badge in the
+    // version list so prereleases are visually distinct.
+    #[serde(default)]
+    pub version_type: String,
     pub files: Vec<VersionFile>,
     #[serde(default)]
     pub dependencies: Vec<VersionDependency>,
@@ -191,6 +195,37 @@ pub async fn get_project_versions_from(
 
 pub async fn get_version(client: &HttpClient, version_id: &str) -> Result<ProjectVersion, NetError> {
     get_version_from(client, MODRINTH_API_BASE, version_id).await
+}
+
+// the full project page: `body` is the long-form markdown description
+// rendered by tui/widgets/markdown.rs (description popups in the browse
+// UIs). `description` is the short search-summary and is carried along for
+// callers that want it, but the body is the point.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProjectBody {
+    pub slug: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub body: String,
+}
+
+pub async fn get_project(
+    client: &HttpClient,
+    project_id: &str,
+) -> Result<ProjectBody, NetError> {
+    get_project_from(client, MODRINTH_API_BASE, project_id).await
+}
+
+pub async fn get_project_from(
+    client: &HttpClient,
+    api_base: &str,
+    project_id: &str,
+) -> Result<ProjectBody, NetError> {
+    let url = format!("{api_base}/project/{project_id}");
+    tracing::debug!("Fetching Modrinth project {}", project_id);
+    client.get_json(&url).await
 }
 
 pub async fn get_version_from(

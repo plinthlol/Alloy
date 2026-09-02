@@ -172,7 +172,8 @@ impl ContentListState {
         self.requested_images
             .retain(|stem| valid_stems.contains(stem.as_str()));
 
-        let font_size = picker.font_size();
+        let fs = picker.font_size();
+        let font_size = (fs.width, fs.height);
 
         // icon decode/resize is CPU-bound, like the initial scan. without
         // a limit, a few-hundred-mod pack fires that many spawn_blocking
@@ -1466,7 +1467,8 @@ fn protocol_icon_columns(
     picker: &ratatui_image::picker::Picker,
 ) -> u16 {
     let rows = entry.icon_lines.as_ref().map_or(3, Vec::len) as u16;
-    square_icon_columns(rows, picker.font_size())
+    let fs = picker.font_size();
+    square_icon_columns(rows, (fs.width, fs.height))
 }
 
 fn square_icon_columns(rows: u16, font_size: (u16, u16)) -> u16 {

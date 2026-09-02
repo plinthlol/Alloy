@@ -113,6 +113,44 @@ pub struct ModFile {
     pub game_versions: Vec<String>,
     #[serde(rename = "fileLength", default)]
     pub file_length: u64,
+    // release channel per CurseForge's file model: 1 = release, 2 = beta,
+    // 3 = alpha. Option + default so a missing field degrades to "release"
+    // rather than failing the whole listing (the model was written without
+    // live API verification, same caveat as the fields above).
+    #[serde(rename = "releaseType", default)]
+    pub release_type: Option<u32>,
+}
+
+// the project's long-form description, returned by CurseForge as HTML.
+// the markdown renderer's normalize_html converts it, so the raw string is
+// passed through untouched. needed as a separate call — the search hit and
+// file listings never carry the body.
+#[derive(Debug, Clone, Deserialize)]
+struct DescriptionResponse {
+    data: String,
+}
+
+pub async fn get_description(
+    client: &HttpClient,
+    api_key: &str,
+    mod_id: u32,
+) -> Result<String, CurseForgeError> {
+    get_description_from(client, CF_API_BASE, api_key, mod_id).await
+}
+
+pub async fn get_description_from(
+    client: &HttpClient,
+    api_base: &str,
+    api_key: &str,
+    mod_id: u32,
+) -> Result<String, CurseForgeError> {
+    require_key(api_key)?;
+    let url = format!("{api_base}/mods/{mod_id}/description?raw=true");
+    tracing::debug!("Fetching CurseForge description for mod {}", mod_id);
+    let resp: DescriptionResponse = client
+        .get_json_with_headers(&url, &[("x-api-key", api_key)])
+        .await?;
+    Ok(resp.data)
 }
 
 fn require_key(api_key: &str) -> Result<(), CurseForgeError> {

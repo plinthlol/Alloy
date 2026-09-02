@@ -19,6 +19,7 @@ use ratatui::{
 };
 use tui_prompts::State as PromptState;
 
+use crate::tui::widgets::popups::description;
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -28,7 +29,8 @@ pub fn render(
     // Copy, so safe to move into the 'static content closure below — see
     // content_browse/render.rs for why the Picker itself doesn't travel
     // further than this.
-    let font_size = picker.font_size();
+    let fs = picker.font_size();
+    let font_size = (fs.width, fs.height);
     // grab the lock, kick off any lazy-loading, then clone and release.
     // fetching happens here (in render) because the wizard is purely
     // reactive: version lists only load when you navigate to that step.
@@ -66,13 +68,28 @@ pub fn render(
     let search_line = snapshot.version_search.title_line();
 
     let theme = THEME.as_ref();
+    let description_open = description::is_open();
+    let description_title = description::title();
     let popup = PopupFrame {
-        title: wizard_title(&snapshot),
+        title: if description_open {
+            crate::tui::widgets::styled_title(&description_title, false)
+        } else {
+            wizard_title(&snapshot)
+        },
         border_color: theme.text_dim(),
         bg: Some(theme.surface()),
-        keybinds: Some(keybinds),
-        search_line,
+        keybinds: Some(if description_open {
+            description::keybinds()
+        } else {
+            keybinds
+        }),
+        search_line: if description_open { None } else { search_line },
         content: Box::new(move |popup_area, buf| {
+            // the description view replaces the wizard's content in place;
+            // markdown::render runs after the frame below (needs &mut Frame)
+            if description_open {
+                return;
+            }
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1)])
@@ -99,6 +116,11 @@ pub fn render(
     };
 
     frame.render_widget(popup, area);
+
+    if description_open {
+        let inner = ratatui::widgets::Block::bordered().inner(area);
+        description::render_content(frame, inner, picker);
+    }
 }
 
 pub fn popup_rect(frame_area: Rect) -> Rect {
@@ -139,9 +161,9 @@ pub fn popup_rect(frame_area: Rect) -> Rect {
         // of search results rather than a short list of fixed choices — it
         // needs the room.
         WizardStep::ModpackBrowse => frame_area
-            .centered(Constraint::Percentage(94), Constraint::Percentage(90)),
+            .centered(Constraint::Percentage(99), Constraint::Percentage(95)),
         WizardStep::ModpackVersion => frame_area
-            .centered(Constraint::Percentage(80), Constraint::Percentage(75)),
+            .centered(Constraint::Percentage(90), Constraint::Percentage(85)),
         WizardStep::ModpackConfirm => {
             let h = 10u16.min(frame_area.height.saturating_sub(4));
             frame_area.centered(w, Constraint::Length(h))
@@ -184,7 +206,8 @@ fn step_keybinds(state: &WizardState) -> ratatui::text::Line<'static> {
                     ("Tab", " source"),
                     ("/", " search"),
                     ("h", " home"),
-                    ("Enter", " select"),
+                    ("Enter", " view"),
+                    ("v", " versions"),
                     ("i", " install latest"),
                 ])
             }

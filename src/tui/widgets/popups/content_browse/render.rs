@@ -8,6 +8,7 @@ use super::state::{BROWSE_STATE, BrowseStep, ContentBrowseState, ContentKind};
 use crate::config::theme::THEME;
 use crate::tui::widgets::browse_step::{self, SearchStepCopy};
 use crate::tui::widgets::popups::base::PopupFrame;
+use crate::tui::widgets::popups::description;
 use crate::tui::widgets::popups::keybind_line;
 use crate::tui::widgets::styled_title;
 use ratatui::{
@@ -31,14 +32,24 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &ratatui_image::picker::Pic
     };
 
     let theme = THEME.as_ref();
-    let title = format!("Add {} \u{2014} {}", snapshot.kind.label(), snapshot.instance_name);
-    let keybinds = step_keybinds(&snapshot);
+    let description_open = description::is_open();
+    let title = if description_open {
+        description::title()
+    } else {
+        format!("Add {} \u{2014} {}", snapshot.kind.label(), snapshot.instance_name)
+    };
+    let keybinds = if description_open {
+        description::keybinds()
+    } else {
+        step_keybinds(&snapshot)
+    };
     // font_size is Copy, so it can move into the 'static content closure;
     // the Picker itself (and its terminal-query state) can't — and doesn't
     // need to. thumbnails go through the process-wide WEB_ICONS cache,
     // which only needs the picker at decode time (drained each tick from
     // the main event loop).
-    let font_size = picker.font_size();
+    let fs = picker.font_size();
+    let font_size = (fs.width, fs.height);
 
     let popup = PopupFrame {
         title: styled_title(&title, false),
@@ -46,18 +57,33 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &ratatui_image::picker::Pic
         bg: Some(theme.surface()),
         keybinds: Some(keybinds),
         search_line: None,
-        content: Box::new(move |popup_area, buf| match snapshot.step {
+        content: Box::new(move |popup_area, buf| {
+            // the description view replaces the popup's content in place;
+            // markdown::render runs after the frame below (needs &mut Frame)
+            if description_open {
+                return;
+            }
+            match snapshot.step {
             BrowseStep::Search => render_search_step(&snapshot, popup_area, buf, font_size),
             BrowseStep::Version => render_version_step(&snapshot, popup_area, buf),
+            }
         }),
     };
 
     frame.render_widget(popup, area);
+
+    if description_open {
+        let inner = ratatui::widgets::Block::bordered().inner(area);
+        description::render_content(frame, inner, picker);
+    }
 }
 
 pub fn popup_rect(frame_area: Rect) -> Rect {
-    let w = Constraint::Percentage(60);
-    let h = Constraint::Percentage(60);
+    // large enough that the 4-line search-result rows (title/meta/desc/spacer
+    // plus a 3-row icon) still show a useful page of results; 80% keeps a
+    // healthy border of the app visible without cramping the list.
+    let w = Constraint::Percentage(80);
+    let h = Constraint::Percentage(80);
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Fill(1), w, Constraint::Fill(1)])
@@ -107,7 +133,8 @@ fn step_keybinds(state: &ContentBrowseState) -> Line<'static> {
                     ("Tab", " source"),
                     ("/", " search"),
                     ("h", " home"),
-                    ("Enter", " select"),
+                    ("Enter", " view"),
+                    ("v", " versions"),
                     ("i", " install latest"),
                 ])
             }

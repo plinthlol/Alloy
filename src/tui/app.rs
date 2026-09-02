@@ -98,7 +98,8 @@ impl App {
             instances_state,
             content: {
                 let mut c = widgets::content::ContentArea::default();
-                c.screenshots.font_size = picker.font_size();
+                let fs = picker.font_size();
+                c.screenshots.font_size = (fs.width, fs.height);
                 c
             },
             account_state: widgets::account::AccountState::default(),

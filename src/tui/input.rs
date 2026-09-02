@@ -7,8 +7,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::app::{App, FocusedArea, JavaSelectTarget};
 use super::widgets::{
-    self, popups::confirm as confirm_popup, popups::content_browse, popups::global_settings,
-    popups::java_select, popups::new_instance,
+    self, popups::confirm as confirm_popup, popups::content_browse, popups::description,
+    popups::global_settings, popups::java_select, popups::new_instance,
 };
 use crate::tui::error_buffer;
 
@@ -53,6 +53,14 @@ impl App {
                     return Ok(());
                 }
             }
+        }
+
+        // the project description popup is modal over the browse popups —
+        // when it's open it eats every keypress (scroll/close) before the
+        // underlying popup or area sees anything.
+        if description::is_open() {
+            description::handle_key(&key_event);
+            return Ok(());
         }
 
         if self.focused == FocusedArea::ConfirmDelete {

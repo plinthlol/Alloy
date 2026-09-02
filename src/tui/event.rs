@@ -188,7 +188,7 @@ impl App {
     // (ContentListState::watch_dir) picks up the new file on its own.
     fn spawn_install_content(&self, params: content_browse::ContentInstallParams) {
         tokio::spawn(async move {
-            let client = crate::net::HttpClient::new();
+            let client = crate::net::HttpClient::shared();
             let dest_dir = params.dest_dir;
 
             if let Err(e) = std::fs::create_dir_all(&dest_dir) {

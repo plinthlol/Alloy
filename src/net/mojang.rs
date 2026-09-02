@@ -13,7 +13,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-use super::{HttpClient, NetError, download_file};
+use super::{HttpClient, NetError, download_file, verify_bytes_sha1, verify_sha1};
 use crate::tui::progress::{clear, set_action, set_progress, set_sub_action};
 
 const MANIFEST_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
@@ -154,10 +154,21 @@ pub async fn download_client_jar(
         .join(&meta.id)
         .join(format!("{}.jar", meta.id));
 
+    // verify the cached jar too: it's the single most critical file for a
+    // launch, and one sha1 of ~25MB costs a few tens of ms — cheap insurance
+    // against a truncated or disk-corrupted cache silently launching broken.
     if jar_path.exists() {
-        tracing::info!("Client JAR already cached: {}", meta.id);
-        tracing::trace!("Cached client JAR path: {}", jar_path.display());
-        return Ok(());
+        match verify_sha1(&jar_path, &meta.downloads.client.sha1).await {
+            Ok(()) => {
+                tracing::info!("Client JAR already cached: {}", meta.id);
+                tracing::trace!("Cached client JAR path: {}", jar_path.display());
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!("Cached client JAR failed sha1 check, re-downloading: {e}");
+                let _ = tokio::fs::remove_file(&jar_path).await;
+            }
+        }
     }
 
     set_action(format!("Downloading Minecraft {}...", meta.id));
@@ -176,6 +187,16 @@ pub async fn download_client_jar(
         },
     )
     .await;
+
+    if result.is_ok() {
+        // a corrupt client jar must never pass for a good one — delete the
+        // bad copy so the next attempt doesn't hit the exists() shortcut.
+        if let Err(e) = verify_sha1(&jar_path, &meta.downloads.client.sha1).await {
+            let _ = tokio::fs::remove_file(&jar_path).await;
+            clear();
+            return Err(e);
+        }
+    }
 
     clear();
     result
@@ -229,7 +250,12 @@ pub async fn download_libraries(
             continue;
         }
 
-        downloads.push((artifact.url.clone(), destination, artifact.path.clone()));
+        downloads.push((
+            artifact.url.clone(),
+            destination,
+            artifact.path.clone(),
+            artifact.sha1.clone(),
+        ));
     }
 
     if downloads.is_empty() {
@@ -267,13 +293,24 @@ pub async fn download_assets_from(
         meta.asset_index.url
     );
 
-    let asset_index: AssetIndexContent = match client.get_json(&meta.asset_index.url).await {
-        Ok(index) => index,
-        Err(e) => {
-            clear();
-            return Err(e);
-        }
-    };
+    // fetch the index with its raw bytes so we can check it against the
+    // sha1 the version meta declares for it — a bad index would otherwise
+    // fan out into hundreds of bogus per-asset downloads.
+    let (asset_index, index_raw): (AssetIndexContent, Vec<u8>) =
+        match client
+            .get_json_with_raw(&meta.asset_index.url, "asset index")
+            .await
+        {
+            Ok((index, raw)) => (index, raw),
+            Err(e) => {
+                clear();
+                return Err(e);
+            }
+        };
+    if let Err(e) = verify_bytes_sha1(&index_raw, &meta.asset_index.sha1) {
+        clear();
+        return Err(e);
+    }
 
     let index_path = meta_dir
         .join("assets")
@@ -333,7 +370,7 @@ pub async fn download_assets_from(
             continue;
         }
 
-        downloads.push((url, destination, object.hash.clone()));
+        downloads.push((url, destination, object.hash.clone(), object.hash.clone()));
     }
 
     if downloads.is_empty() {
@@ -354,10 +391,14 @@ pub async fn download_assets_from(
 
 // bounded parallel downloader: up to MAX_CONCURRENT_DOWNLOADS tasks, new
 // ones fed in as each finishes. keeps going after errors so we grab as
-// much as possible before surfacing the first failure.
+// much as possible before surfacing the first failure. each job is
+// (url, destination, progress label, expected sha1) — the sha1 is checked
+// after the body lands so a truncated/corrupted download never counts as
+// cached (the bad file is removed; the skip-if-exists shortcut would
+// otherwise keep serving it forever).
 async fn run_parallel_downloads(
     client: &HttpClient,
-    downloads: Vec<(String, PathBuf, String)>,
+    downloads: Vec<(String, PathBuf, String, String)>,
     report_count_progress: bool,
 ) -> Result<(), NetError> {
     let total_downloads = downloads.len() as u64;
@@ -421,9 +462,9 @@ async fn run_parallel_downloads(
 fn spawn_download_task(
     set: &mut JoinSet<Result<String, NetError>>,
     client: &HttpClient,
-    job: (String, PathBuf, String),
+    job: (String, PathBuf, String, String),
 ) {
-    let (url, destination, label) = job;
+    let (url, destination, label, expected_sha1) = job;
     let task_client = client.clone();
 
     set.spawn(async move {
@@ -433,6 +474,16 @@ fn spawn_download_task(
             destination.display()
         );
         let result = download_file(&task_client, &url, &destination, |_current, _total| {}).await;
+        let result = match result {
+            Ok(()) => verify_sha1(&destination, &expected_sha1).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &result {
+            // best-effort cleanup so the exists() cache check can't keep
+            // serving a file we just proved bad.
+            let _ = tokio::fs::remove_file(&destination).await;
+            tracing::debug!("Download failed: {}", e);
+        }
         result.map(|()| {
             tracing::trace!("Finished parallel download '{}'", label);
             label

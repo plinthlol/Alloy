@@ -16,6 +16,7 @@ use crate::instance::{
 use crate::net::curseforge;
 use crate::net::modrinth::{ProjectVersion, SearchHit};
 use crate::tui::widgets::instances;
+use crate::tui::widgets::popups::description;
 use crossterm::event::{KeyCode, KeyEvent};
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -141,10 +142,54 @@ pub enum ModpackVersionHit {
 }
 
 impl ModpackVersionHit {
+    // the row's big text: the Minecraft version(s) this release targets.
+    // installs from the content-browse popup see exactly one (filtered by
+    // the instance's game version); unfiltered modpack listings can carry
+    // a long tag list, so cap it.
     pub fn label(&self) -> String {
+        let joined = self.game_versions();
+        let versions: Vec<&str> = joined.split(", ").filter(|s| !s.is_empty()).collect();
+        match versions.as_slice() {
+            [] => self.version_name(),
+            [one] => (*one).to_string(),
+            _ => {
+                const SHOWN: usize = 3;
+                let mut out = versions.iter().take(SHOWN).map(|s| *s).collect::<Vec<_>>().join(", ");
+                if versions.len() > SHOWN {
+                    out.push_str(&format!(" +{}", versions.len() - SHOWN));
+                }
+                out
+            }
+        }
+    }
+
+    // the release's own name — Modrinth's version_number, or CurseForge's
+    // display_name with a trailing archive extension stripped (some CF
+    // authors set displayName to the raw file name, and "mod-1.2.3.jar"
+    // is the file name, not something to headline the row with).
+    pub fn version_name(&self) -> String {
         match self {
-            ModpackVersionHit::Modrinth(v) => format!("{} ({})", v.name, v.version_number),
-            ModpackVersionHit::CurseForge(f) => f.display_name.clone(),
+            ModpackVersionHit::Modrinth(v) => v.version_number.clone(),
+            ModpackVersionHit::CurseForge(f) => strip_archive_extension(&f.display_name),
+        }
+    }
+
+    // "beta"/"alpha" when the release isn't stable; None for releases (and
+    // anything the catalogs don't classify), so stable versions render no
+    // badge instead of a constant "release" tag on every row.
+    pub fn channel(&self) -> Option<&'static str> {
+        match self {
+            ModpackVersionHit::Modrinth(v) => match v.version_type.as_str() {
+                "beta" => Some("beta"),
+                "alpha" => Some("alpha"),
+                _ => None,
+            },
+            // CurseForge releaseType: 1 = release, 2 = beta, 3 = alpha.
+            ModpackVersionHit::CurseForge(f) => match f.release_type {
+                Some(2) => Some("beta"),
+                Some(3) => Some("alpha"),
+                _ => None,
+            },
         }
     }
 
@@ -165,6 +210,20 @@ impl ModpackVersionHit {
             ModpackVersionHit::CurseForge(_) => "resolved during install".to_string(),
         }
     }
+}
+
+// trailing archive extension from a CurseForge display name, if any —
+// case-insensitive, and only when the stem is left non-empty.
+fn strip_archive_extension(name: &str) -> String {
+    let lowered = name.to_lowercase();
+    for ext in [".jar", ".zip"] {
+        if let Some(stem) = lowered.strip_suffix(ext)
+            && !stem.is_empty()
+        {
+            return name[..name.len() - ext.len()].to_string();
+        }
+    }
+    name.to_string()
 }
 
 // what to fetch versions/files for, once a ModpackHit is picked - carries
@@ -691,7 +750,22 @@ fn handle_modpack_browse_key(
             state.step = WizardStep::ModpackConfirm;
             ensure_modpack_versions_loaded(state, query);
         }
+        // 'v' keeps the old Enter behavior (version list); Enter itself
+        // opens the full project description, same as the content-browse
+        // popup. 'i' still fast-tracks to Confirm with the newest version.
         KeyCode::Enter => {
+            let Some(hit) = state.selected_modpack().cloned() else {
+                return;
+            };
+            let source = match &hit {
+                ModpackHit::Modrinth(h) => description::DescriptionSource::Modrinth {
+                    project_id: h.project_id.clone(),
+                },
+                ModpackHit::CurseForge(m) => description::DescriptionSource::CurseForge { mod_id: m.id },
+            };
+            description::open(source, hit.title());
+        }
+        KeyCode::Char('v') => {
             state.modpack_versions = LoadState::Idle;
             state.modpack_version_idx = 0;
             let query = match state.selected_modpack() {
@@ -869,7 +943,7 @@ pub(crate) fn ensure_versions_loaded(state: &mut WizardState) {
     let versions_arc = WIZARD_STATE.clone();
     let loader = state.selected_loader();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let installer = get_installer(loader);
         match installer.get_game_versions(&client).await {
             Ok(mut versions) => match versions_arc.lock() {
@@ -906,7 +980,7 @@ pub(crate) fn ensure_loader_versions_loaded(
     state.loader_versions = LoadState::Loading;
     let versions_arc = WIZARD_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let installer = get_installer(loader);
         match installer.get_versions(&client, &game_version).await {
             Ok(versions) => match versions_arc.lock() {
@@ -972,7 +1046,7 @@ pub(crate) fn ensure_modpack_search(state: &mut WizardState) {
     state.modpack_idx = 0;
     let state_arc = WIZARD_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let outcome: Result<Vec<ModpackHit>, String> = match source {
             ModpackSource::Modrinth => {
                 crate::net::modrinth::search(&client, &query, "modpack", None, None, 0, 40)
@@ -1028,7 +1102,7 @@ pub(crate) fn ensure_modpack_versions_loaded(state: &mut WizardState, query: Mod
     state.modpack_versions = LoadState::Loading;
     let state_arc = WIZARD_STATE.clone();
     tokio::spawn(async move {
-        let client = crate::net::HttpClient::new();
+        let client = crate::net::HttpClient::shared();
         let outcome: Result<Vec<ModpackVersionHit>, String> = match query {
             ModpackVersionQuery::Modrinth(project_id) => {
                 crate::net::modrinth::get_project_versions(&client, &project_id, None, None)
