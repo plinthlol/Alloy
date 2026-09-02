@@ -60,11 +60,46 @@ impl State {
             search: SearchState::default(),
             renaming: None,
         };
+        s.sort_by_last_played();
         if count > 0 {
             s.list_state.selected = Some(0);
         }
         s.update_scrollbar();
         s
+    }
+
+    // orders the sidebar most-recently-launched first, never-played last,
+    // name as a deterministic tiebreaker. called on startup and whenever the
+    // list changes (launch stamps, create, rename), so the instance you just
+    // launched climbs to the top and the cursor follows it there.
+    pub fn sort_by_last_played(&mut self) {
+        // remember who was selected so the cursor can follow the row as it
+        // moves (selection is an index into the *filtered* view, so restore
+        // it by name through filtered_indices).
+        let selected_name = self.selected_instance().map(|inst| inst.name.clone());
+        self.instances.sort_by(|a, b| match (a.last_played, b.last_played) {
+            (Some(x), Some(y)) => y.cmp(&x).then_with(|| a.name.cmp(&b.name)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.cmp(&b.name),
+        });
+        if let Some(name) = selected_name {
+            self.select_by_name(&name);
+        }
+        self.update_scrollbar();
+    }
+
+    // moves the cursor onto the instance with this name (no-op if it's
+    // filtered out by search).
+    fn select_by_name(&mut self, name: &str) {
+        let filtered = self.filtered_indices();
+        if let Some(pos) = filtered
+            .iter()
+            .position(|&idx| self.instances[idx].name == name)
+        {
+            self.list_state.selected = Some(pos);
+            self.update_scrollbar();
+        }
     }
 
     pub fn selected_instance(&self) -> Option<&InstanceConfig> {
@@ -140,8 +175,12 @@ impl State {
     }
 
     pub fn add_instance(&mut self, instance: InstanceConfig) {
+        let name = instance.name.clone();
         self.instances.push(instance);
-        self.update_scrollbar();
+        self.sort_by_last_played();
+        // a fresh instance lands among the never-played rows; put the
+        // cursor on it so it's what the user sees after the wizard closes.
+        self.select_by_name(&name);
     }
 
     pub fn replace_instance(&mut self, old_name: &str, instance: InstanceConfig) {
@@ -154,7 +193,9 @@ impl State {
         } else {
             self.instances.push(instance);
         }
-        self.update_scrollbar();
+        // renames can reshuffle the name-tiebreak order among never-played
+        // instances; re-sort and let the cursor follow the selected row.
+        self.sort_by_last_played();
     }
 }
 

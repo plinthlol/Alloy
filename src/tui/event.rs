@@ -492,6 +492,9 @@ impl App {
                         break;
                     }
                 }
+                // the just-launched instance jumps to the top of the
+                // sidebar; the cursor follows it to its new position.
+                self.instances_state.sort_by_last_played();
                 if let Err(e) = self.instance_manager.touch_last_played(&name) {
                     tracing::warn!("Failed to persist last_played for '{}': {}", name, e);
                 }
