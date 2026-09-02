@@ -238,7 +238,6 @@ pub fn send_kill(name: &str) -> bool {
         }
         remove_pid_file(name);
         remove(name);
-        push_last_played(name, Utc::now());
         return true;
     }
 

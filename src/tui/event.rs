@@ -483,10 +483,8 @@ impl App {
                 self.spawn_install_content(params)
             }
             // updates the in-memory list (for the UI) and the on-disk
-            // config (so it survives a restart) for every ended session —
-            // normal exit, manual kill, or an orphan reaped by
-            // reap_dead_orphans(). centralizing the write here means every
-            // path persists last_played the same way.
+            // config (so it survives a restart). LastPlayed is emitted
+            // exactly once per session, at launch — see launch/mod.rs.
             super::events::UiEvent::LastPlayed(name, time) => {
                 for inst in &mut self.instances_state.instances {
                     if inst.name == name {

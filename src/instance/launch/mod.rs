@@ -554,6 +554,15 @@ pub async fn launch(
 
     crate::running::set_state(&name, crate::running::RunState::Running);
 
+    // last_played is stamped once, here at launch — the "last launched"
+    // moment, not the session's end. stamping only at exit left running
+    // sessions showing their *previous* session's time and lost sessions
+    // that ended while the TUI was closed; a launch-time stamp survives
+    // both (a session that dies while alloy is shut down was already
+    // recorded when it started). persisted by the TUI event loop via
+    // UiEvent::LastPlayed.
+    crate::running::push_last_played(&name, chrono::Utc::now());
+
     // no session log of our own: minecraft's log4j already writes
     // .minecraft/logs/latest.log and rotates it (see log_files.rs). the
     // capture below only feeds the live TUI buffer and catches pre-log4j
@@ -683,10 +692,6 @@ pub async fn launch(
             });
         }
 
-        // last_played is persisted centrally by the TUI event loop's
-        // apply_event (via UiEvent::LastPlayed), covering every way a
-        // session ends — normal exit, kill, or a reaped orphan.
-        crate::running::push_last_played(&name_for_task, chrono::Utc::now());
         crate::running::cleanup_kill_sender(&name_for_task);
     });
 
