@@ -825,6 +825,7 @@ mod tests {
                     version_number: "1.0.0".into(),
                     game_versions: vec!["1.20.1".into()],
                     loaders: vec!["forge".into()],
+                    version_type: "release".into(),
                     files: vec![],
                     dependencies: vec![],
                 },

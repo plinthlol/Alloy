@@ -59,6 +59,10 @@ pub struct DescriptionState {
     pub gallery_open: bool,
     pub gallery_idx: usize,
     pub gallery_scroll_row: usize,
+    // columns the grid was last rendered with, so handle_key can move the
+    // selection a full row per j/k press (render and input share one lock,
+    // but input can fire before the first render — hence the default).
+    pub gallery_cols: usize,
     pub preview_open: bool,
     gallery_protocols: HashMap<String, StatefulProtocol>,
 }
@@ -78,6 +82,7 @@ impl Default for DescriptionState {
             gallery_open: false,
             gallery_idx: 0,
             gallery_scroll_row: 0,
+            gallery_cols: 1,
             preview_open: false,
             gallery_protocols: HashMap::new(),
         }
@@ -150,6 +155,16 @@ pub fn open(source: DescriptionSource, fallback_title: &str) {
         state.error = None;
         state.scroll = 0;
         state.max_scroll = 0;
+        // the previous project's gallery state must not leak into the new
+        // one while the fetch is in flight: render_content checks
+        // gallery_open before the loading state, so a stale `true` would
+        // show the old project's grid over the new "Loading...".
+        state.gallery = Vec::new();
+        state.gallery_open = false;
+        state.gallery_idx = 0;
+        state.gallery_scroll_row = 0;
+        state.gallery_cols = 1;
+        state.preview_open = false;
         state.request_id
     };
     // dedicated OS thread with its own single-thread runtime instead of
@@ -251,6 +266,7 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
                                     thumb: g.url.clone(),
                                     raw: g.raw_url.clone().unwrap_or_else(|| g.url.clone()),
                                     title: g.title.clone(),
+                                    featured: g.featured,
                                 })
                                 .collect();
                             (p.title, append_gallery(p.body, &p.gallery), gallery)
@@ -283,7 +299,11 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
     };
 
     // curseforge has no gallery endpoint; its description-embedded images
-    // are the closest thing, so let the grid show those (untitled).
+    // are the closest thing, so let the grid show those (untitled). the
+    // document parsed for the extraction is reused as the render document —
+    // normalize_html + markdown parse is the slowest local step in this
+    // function and running it twice was pure waste.
+    let mut parsed = None;
     if gallery.is_empty()
         && let Ok(document) = build_document(&title, &body)
     {
@@ -294,17 +314,22 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
                 thumb: url.clone(),
                 raw: url,
                 title: String::new(),
+                featured: false,
             })
             .collect();
+        parsed = Some(document);
     }
 
-    let mut document = match build_document(&title, &body) {
-        Ok(document) => document,
-        Err(message) => {
-            apply(request_id, &key, |state| state.error = Some(message));
-            request_redraw();
-            return;
-        }
+    let mut document = match parsed {
+        Some(document) => document,
+        None => match build_document(&title, &body) {
+            Ok(document) => document,
+            Err(message) => {
+                apply(request_id, &key, |state| state.error = Some(message));
+                request_redraw();
+                return;
+            }
+        },
     };
 
     // satisfy what we can from the image cache before fetching the rest
@@ -325,9 +350,11 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
     // grid thumbnails first: they're tiny and the gallery is what the user
     // opens first; the big full-res description images can trickle in after.
     let thumbs: Vec<String> = state_gallery_thumbs(&gallery).collect();
-    missing.sort_by_key(|url| !thumbs.contains(url));
+    // dedup first, THEN apply the thumbs-first priority — an unconditional
+    // sort() after sort_by_key() would wipe the priority out.
     missing.sort();
     missing.dedup();
+    missing.sort_by_key(|url| !thumbs.contains(url));
 
     apply(request_id, &key, |state| {
         state.title = title;
@@ -347,10 +374,12 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
         return;
     }
 
-    // bounded fetch of inline images: same 4-at-a-time shape as rmcl's
-    // discovery page, results applied only if this request still owns the
-    // popup (not superseded by another open()).
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    // bounded fetch of inline images: 8-at-a-time — CDN-backed asset urls
+    // tolerate the parallelism and the popup is only usable once the
+    // gallery thumbnails land, so throughput here is perceived load time.
+    // results applied only if this request still owns the popup (not
+    // superseded by another open()).
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
     let mut tasks = tokio::task::JoinSet::new();
     for url in missing {
         let client = client.clone();
@@ -406,11 +435,13 @@ fn apply(request_id: u64, key: &str, f: impl FnOnce(&mut DescriptionState)) {
 /// one gallery entry: `thumb` (small, for the grid) and `raw` (full
 /// resolution, for the preview overlay). modrinth provides both; for
 /// curseforge they're the same url (description-embedded images).
+/// `featured` is modrinth's author-picked badge, shown as a star caption.
 #[derive(Clone)]
 pub struct GalleryItem {
     pub thumb: String,
     pub raw: String,
     pub title: String,
+    pub featured: bool,
 }
 
 pub enum KeyAction {
@@ -430,19 +461,29 @@ pub fn handle_key(key_event: &crossterm::event::KeyEvent) -> KeyAction {
     let mut state = lock_state();
     let gallery_len = state.gallery.len();
 
-    // full-image preview: any of the close keys steps back to the grid.
+    // full-image preview: close keys step back to the grid; h/l walk the
+    // images without the round-trip through the grid.
     if state.preview_open {
         match key_event.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('b') | KeyCode::Char('q') => {
                 state.preview_open = false;
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                state.gallery_idx = state.gallery_idx.saturating_sub(1);
+            }
+            KeyCode::Char('l') | KeyCode::Right if state.gallery_idx + 1 < gallery_len => {
+                state.gallery_idx += 1;
             }
             _ => {}
         }
         return KeyAction::Consumed;
     }
 
-    // gallery grid: navigate thumbnails, Enter previews, b/Esc/g back.
+    // gallery grid: a 2D grid, so the selection moves like a cursor —
+    // j/k (and arrows) a full row, h/l (and arrows) one item, PgUp/PgDn a
+    // page, Enter previews, b/Esc/g back.
     if state.gallery_open {
+        let cols = state.gallery_cols.max(1);
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('b') | KeyCode::Char('g') => {
                 state.gallery_open = false;
@@ -450,10 +491,16 @@ pub fn handle_key(key_event: &crossterm::event::KeyEvent) -> KeyAction {
                 state.gallery_scroll_row = 0;
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                state.gallery_idx = (state.gallery_idx + 1).min(gallery_len.saturating_sub(1));
+                state.gallery_idx = (state.gallery_idx + cols).min(gallery_len.saturating_sub(1));
             }
             KeyCode::Char('k') | KeyCode::Up => {
+                state.gallery_idx = state.gallery_idx.saturating_sub(cols);
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
                 state.gallery_idx = state.gallery_idx.saturating_sub(1);
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                state.gallery_idx = (state.gallery_idx + 1).min(gallery_len.saturating_sub(1));
             }
             KeyCode::PageDown => {
                 state.gallery_idx =
@@ -462,7 +509,7 @@ pub fn handle_key(key_event: &crossterm::event::KeyEvent) -> KeyAction {
             KeyCode::PageUp => {
                 state.gallery_idx = state.gallery_idx.saturating_sub(GRID_PAGE);
             }
-            KeyCode::Enter | KeyCode::Char('l') if gallery_len > 0 => {
+            KeyCode::Enter if gallery_len > 0 => {
                 state.preview_open = true;
             }
             // v/i still pass through to the popup's own handlers.
@@ -534,11 +581,11 @@ pub fn title() -> String {
 pub fn keybinds() -> ratatui::text::Line<'static> {
     let state = lock_state();
     if state.preview_open {
-        return keybind_line(&[("b/Esc", " close")]);
+        return keybind_line(&[("h/l", " switch"), ("b/Esc", " close")]);
     }
     if state.gallery_open {
         return keybind_line(&[
-            ("j/k", " move"),
+            ("h/l/j/k", " move"),
             ("PgUp/PgDn", " page"),
             ("Enter", " view"),
             ("b/Esc", " back"),
@@ -609,6 +656,13 @@ fn gallery_image(source_key: &str, url: &str) -> Option<image::DynamicImage> {
     lock_images().get(&(source_key.to_string(), url.to_string())).cloned()
 }
 
+// pixel dimensions of a cached image, for the footer/preview info line.
+fn cached_dimensions(source_key: &str, url: &str) -> Option<(u32, u32)> {
+    lock_images()
+        .get(&(source_key.to_string(), url.to_string()))
+        .map(|image| (image.width(), image.height()))
+}
+
 fn render_gallery(
     frame: &mut Frame,
     inner: Rect,
@@ -624,12 +678,41 @@ fn render_gallery(
         return;
     }
 
-    let min_cols = (inner.width / MAX_CELL_WIDTH).max(1) as usize;
-    let max_cols = (inner.width / MIN_CELL_WIDTH).max(1) as usize;
-    let target_cols = (inner.width / TARGET_CELL_WIDTH).max(1) as usize;
-    let cols = target_cols.clamp(min_cols, max_cols);
-    let rows = (inner.height.saturating_sub(2) / CELL_HEIGHT).max(1) as usize;
+    // header: provider + count, so the view reads as a gallery page rather
+    // than a floating grid; the grid and footer live below it.
+    let provider = if state.source_key.starts_with("curseforge:") {
+        "CurseForge"
+    } else {
+        "Modrinth"
+    };
+    let header = format!(
+        "{provider} gallery \u{b7} {total} image{}",
+        if total == 1 { "" } else { "s" }
+    );
+    Paragraph::new(header)
+        .style(Style::default().fg(theme.text_dim()))
+        .render(
+            Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            },
+            frame.buffer_mut(),
+        );
+    let grid_area = Rect {
+        y: inner.y.saturating_add(1),
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
 
+    let min_cols = (grid_area.width / MAX_CELL_WIDTH).max(1) as usize;
+    let max_cols = (grid_area.width / MIN_CELL_WIDTH).max(1) as usize;
+    let target_cols = (grid_area.width / TARGET_CELL_WIDTH).max(1) as usize;
+    let cols = target_cols.clamp(min_cols, max_cols);
+    let rows = (grid_area.height.saturating_sub(1) / CELL_HEIGHT).max(1) as usize;
+    // remembered for handle_key: j/k move a full row, h/l one item.
+    state.gallery_cols = cols;
 
     // keep the selection inside the visible window
     let sel_row = state.gallery_idx / cols;
@@ -650,18 +733,19 @@ fn render_gallery(
             if idx >= total {
                 break;
             }
-            let (thumb, title) = (
+            let (thumb, title, featured) = (
                 state.gallery[idx].thumb.clone(),
                 state.gallery[idx].title.clone(),
+                state.gallery[idx].featured,
             );
             let is_selected = idx == state.gallery_idx;
             let cell = Rect {
-                x: inner.x + c as u16 * (inner.width / cols as u16),
-                y: inner.y + r as u16 * CELL_HEIGHT,
-                width: inner.width / cols as u16,
+                x: grid_area.x + c as u16 * (grid_area.width / cols as u16),
+                y: grid_area.y + r as u16 * CELL_HEIGHT,
+                width: grid_area.width / cols as u16,
                 height: CELL_HEIGHT,
             };
-            if cell.width == 0 || cell.right() > inner.right() || cell.bottom() > inner.bottom() {
+            if cell.width == 0 || cell.right() > grid_area.right() || cell.bottom() > grid_area.bottom() {
                 continue;
             }
 
@@ -678,10 +762,11 @@ fn render_gallery(
                 width: cell.width.saturating_sub(2),
                 height: CELL_IMAGE_ROWS,
             };
+            let star = if featured { "\u{2605} " } else { "" };
             let caption = if title.is_empty() {
-                format!("{} / {total}", idx + 1)
+                format!("{star}{} / {total}", idx + 1)
             } else {
-                title.clone()
+                format!("{star}{title}")
             };
             let caption_area = Rect {
                 x: cell.x + 1,
@@ -720,14 +805,8 @@ fn render_gallery(
         }
     }
 
-    // footer: selected caption + position
-    let sel_title = state.gallery[state.gallery_idx].title.clone();
-    let footer = if sel_title.is_empty() {
-        format!("{} / {total}", state.gallery_idx + 1)
-    } else {
-        format!("{}  \u{b7}  {} / {total}", sel_title, state.gallery_idx + 1)
-    };
-    Paragraph::new(footer)
+    // footer: just the position counter.
+    Paragraph::new(format!("{} / {total}", state.gallery_idx + 1))
         .style(Style::default().fg(theme.text_dim()))
         .render(
             Rect {
@@ -784,7 +863,13 @@ fn render_preview(
         }
     }
 
-    let hint = Paragraph::new(format!("{} / {}", state.gallery_idx + 1, state.gallery.len()))
+    let hint_text = match cached_dimensions(&state.source_key, &raw) {
+        Some((width, height)) => {
+            format!("{width}\u{d7}{height}  \u{b7}  {} / {}", state.gallery_idx + 1, state.gallery.len())
+        }
+        None => format!("{} / {}", state.gallery_idx + 1, state.gallery.len()),
+    };
+    let hint = Paragraph::new(hint_text)
         .style(Style::default().fg(theme.text_dim()))
         .alignment(ratatui::layout::Alignment::Center);
     hint.render(

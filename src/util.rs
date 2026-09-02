@@ -8,14 +8,27 @@
 pub fn format_count(n: u64) -> String {
     const UNITS: [(u64, &str); 3] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")];
 
-    for (threshold, suffix) in UNITS {
-        if n >= threshold {
-            let scaled = n as f64 / threshold as f64;
+    for (i, (threshold, suffix)) in UNITS.iter().enumerate() {
+        if n >= *threshold {
+            let scaled = n as f64 / *threshold as f64;
             // round first so 999_950 doesn't print as "1000.0K" — re-check
             // the threshold after rounding and fall through to the next
             // (larger) unit if it rolled over.
             let rounded = (scaled * 10.0).round() / 10.0;
             if rounded >= 1000.0 {
+                // rounding rolled over into the next unit up (999_950 ->
+                // 1000.0K -> 1M) even though n is below that unit's
+                // threshold — round against the larger threshold instead of
+                // falling off the end of UNITS and printing the raw number.
+                if let Some((next_threshold, next_suffix)) = i.checked_sub(1).and_then(|j| UNITS.get(j)) {
+                    let scaled = n as f64 / *next_threshold as f64;
+                    let rounded = (scaled * 10.0).round() / 10.0;
+                    return if (rounded - rounded.trunc()).abs() < f64::EPSILON {
+                        format!("{}{}", rounded as u64, next_suffix)
+                    } else {
+                        format!("{rounded:.1}{next_suffix}")
+                    };
+                }
                 continue;
             }
             return if (rounded - rounded.trunc()).abs() < f64::EPSILON {

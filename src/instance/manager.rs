@@ -361,6 +361,10 @@ impl InstanceManager {
             tracing::debug!("Ignoring no-op instance rename '{}'", old_name);
             return Ok(());
         }
+        // same path-traversal guards as create: without this, "../x" or ".x"
+        // would move the instance directory out of (or hide it inside) the
+        // instances root. ported from upstream rmcl 51bb896.
+        validate_name(new_name)?;
         let old_dir = self.instances_dir.join(old_name);
         let new_dir = self.instances_dir.join(new_name);
         if !old_dir.exists() {
@@ -652,6 +656,22 @@ mod tests {
         manager.save(&dummy_config("same")).expect("save");
         manager.rename("same", "same").expect("noop rename");
         assert!(dir.exists());
+    }
+
+    #[test]
+    fn rename_traversal_target_rejects() {
+        // "../escape" must not move the instance directory out of the
+        // instances root.
+        let (manager, tmp) = test_manager();
+        std::fs::create_dir_all(tmp.path().join("orig")).unwrap();
+        manager.save(&dummy_config("orig")).expect("save");
+        let err = manager.rename("orig", "../escape").unwrap_err();
+        assert!(matches!(err, InstanceError::InvalidName(_)));
+        assert!(
+            !tmp.path().parent().unwrap().join("escape").exists(),
+            "nothing may land outside the instances root"
+        );
+        assert!(tmp.path().join("orig").exists(), "source must be untouched");
     }
 
     #[test]
