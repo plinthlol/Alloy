@@ -95,6 +95,9 @@ const GRID_PAGE: usize = 9;
 static DESCRIPTION_STATE: LazyLock<Arc<Mutex<DescriptionState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(DescriptionState::default())));
 
+const MAX_BODY_CACHE_ENTRIES: usize = 40;
+const MAX_IMAGE_CACHE_ENTRIES: usize = 64;
+
 // fetched bodies, so re-opening a project you already viewed is instant.
 // key = DescriptionSource::key() -> (title, markdown/html body).
 static BODY_CACHE: LazyLock<Mutex<HashMap<String, (String, String, Vec<GalleryItem>)>>> =
@@ -287,7 +290,11 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
             };
             match result {
                 Ok(pair) => {
-                    lock_bodies().insert(key.clone(), pair.clone());
+                    let mut bodies = lock_bodies();
+                    if bodies.len() >= MAX_BODY_CACHE_ENTRIES {
+                        bodies.clear();
+                    }
+                    bodies.insert(key.clone(), pair.clone());
                     pair
                 }
                 Err(e) => {
@@ -405,7 +412,11 @@ async fn fetch(request_id: u64, key: String, source: DescriptionSource, fallback
     while let Some(task) = tasks.join_next().await {
         let Ok((url, result)) = task else { continue };
         if let Ok(image) = &result {
-            lock_images().insert((key.clone(), url.clone()), image.clone());
+            let mut cache = lock_images();
+            if cache.len() >= MAX_IMAGE_CACHE_ENTRIES {
+                cache.clear();
+            }
+            cache.insert((key.clone(), url.clone()), image.clone());
         }
         apply(request_id, &key, |state| {
             if let Some(document) = state.document.as_mut() {

@@ -10,6 +10,9 @@
 // confirms classIds) before trusting this in production.
 
 use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use crate::instance::models::ModLoader;
@@ -17,6 +20,38 @@ use crate::net::{HttpClient, NetError, download_file};
 use std::path::Path;
 
 const CF_API_BASE: &str = "https://api.curseforge.com/v1";
+
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
+const FILES_CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_CACHE_ENTRIES: usize = 200;
+
+static SEARCH_CACHE: LazyLock<Mutex<HashMap<String, (Instant, SearchResponse)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static FILES_CACHE: LazyLock<Mutex<HashMap<String, (Instant, FilesResponse)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static FILE_CACHE: LazyLock<Mutex<HashMap<String, (Instant, ModFile)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_get<T: Clone>(
+    map: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<T> {
+    map.lock()
+        .ok()?
+        .get(key)
+        .filter(|(at, _)| at.elapsed() < ttl)
+        .map(|(_, v)| v.clone())
+}
+
+fn cache_put<T>(map: &Mutex<HashMap<String, (Instant, T)>>, key: String, value: T) {
+    if let Ok(mut guard) = map.lock() {
+        if guard.len() >= MAX_CACHE_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(key, (Instant::now(), value));
+    }
+}
 pub const MINECRAFT_GAME_ID: u32 = 432;
 
 pub const CLASS_ID_MODPACK: u32 = 4471;
@@ -218,6 +253,10 @@ pub async fn search_from(
         url.push_str(&format!("&modLoaderType={lt}"));
     }
 
+    if let Some(cached) = cache_get(&SEARCH_CACHE, &url, SEARCH_CACHE_TTL) {
+        return Ok(cached);
+    }
+
     tracing::debug!("Searching CurseForge: {}", url);
     let resp: SearchResponse = client
         .get_json_with_headers(&url, &[("x-api-key", api_key)])
@@ -227,6 +266,7 @@ pub async fn search_from(
         resp.data.len(),
         resp.pagination.total_count
     );
+    cache_put(&SEARCH_CACHE, url, resp.clone());
     Ok(resp)
 }
 
@@ -267,10 +307,14 @@ pub async fn get_file_from(
 ) -> Result<ModFile, CurseForgeError> {
     require_key(api_key)?;
     let url = format!("{api_base}/mods/{mod_id}/files/{file_id}");
+    if let Some(cached) = cache_get(&FILE_CACHE, &url, FILES_CACHE_TTL) {
+        return Ok(cached);
+    }
     tracing::debug!("Fetching CurseForge file {} for mod {}", file_id, mod_id);
     let resp: FileResponse = client
         .get_json_with_headers(&url, &[("x-api-key", api_key)])
         .await?;
+    cache_put(&FILE_CACHE, url, resp.data.clone());
     Ok(resp.data)
 }
 
@@ -292,10 +336,15 @@ pub async fn get_files_from(
         url.push_str(&format!("modLoaderType={lt}&"));
     }
 
+    if let Some(cached) = cache_get(&FILES_CACHE, &url, FILES_CACHE_TTL) {
+        return Ok(cached);
+    }
+
     tracing::debug!("Fetching CurseForge files for mod {}", mod_id);
     let resp: FilesResponse = client
         .get_json_with_headers(&url, &[("x-api-key", api_key)])
         .await?;
+    cache_put(&FILES_CACHE, url, resp.clone());
     Ok(resp)
 }
 

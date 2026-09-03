@@ -3,12 +3,46 @@
 // `_from(base)` variant so tests can point at a wiremock server.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::instance::models::ModLoader;
 use crate::net::{HttpClient, NetError, download_file};
 use std::path::Path;
 
 const MODRINTH_API_BASE: &str = "https://api.modrinth.com/v2";
+
+const SEARCH_CACHE_TTL: Duration = Duration::from_secs(60);
+const VERSIONS_CACHE_TTL: Duration = Duration::from_secs(300);
+const MAX_CACHE_ENTRIES: usize = 200;
+
+static SEARCH_CACHE: LazyLock<Mutex<HashMap<String, (Instant, SearchResponse)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+type CachedVersions = Vec<ProjectVersion>;
+static VERSIONS_CACHE: LazyLock<Mutex<HashMap<String, (Instant, CachedVersions)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_get<T: Clone>(
+    map: &Mutex<HashMap<String, (Instant, T)>>,
+    key: &str,
+    ttl: Duration,
+) -> Option<T> {
+    map.lock()
+        .ok()?
+        .get(key)
+        .filter(|(at, _)| at.elapsed() < ttl)
+        .map(|(_, v)| v.clone())
+}
+
+fn cache_put<T>(map: &Mutex<HashMap<String, (Instant, T)>>, key: String, value: T) {
+    if let Ok(mut guard) = map.lock() {
+        if guard.len() >= MAX_CACHE_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(key, (Instant::now(), value));
+    }
+}
 
 // modrinth loader facet strings. vanilla has no loader tag, so it maps to
 // None and callers skip the filter.
@@ -148,6 +182,9 @@ pub async fn search_from(
         limit,
         index,
     );
+    if let Some(cached) = cache_get(&SEARCH_CACHE, &url, SEARCH_CACHE_TTL) {
+        return Ok(cached);
+    }
     tracing::debug!("Searching Modrinth: {}", url);
     let resp: SearchResponse = client.get_json(&url).await?;
     tracing::debug!(
@@ -155,6 +192,7 @@ pub async fn search_from(
         resp.hits.len(),
         resp.total_hits
     );
+    cache_put(&SEARCH_CACHE, url, resp.clone());
     Ok(resp)
 }
 
@@ -183,6 +221,9 @@ pub async fn get_project_versions_from(
     if let Some(l) = loader.and_then(loader_facet) {
         url.push_str(&format!("loaders=[\"{}\"]&", l));
     }
+    if let Some(cached) = cache_get(&VERSIONS_CACHE, &url, VERSIONS_CACHE_TTL) {
+        return Ok(cached);
+    }
     tracing::debug!("Fetching Modrinth versions for project {}", project_id);
     let versions: Vec<ProjectVersion> = client.get_json(&url).await?;
     tracing::debug!(
@@ -190,6 +231,7 @@ pub async fn get_project_versions_from(
         versions.len(),
         project_id
     );
+    cache_put(&VERSIONS_CACHE, url, versions.clone());
     Ok(versions)
 }
 
@@ -312,6 +354,89 @@ mod tests {
     fn loader_facet_maps_known_loaders() {
         assert_eq!(loader_facet(ModLoader::Fabric), Some("fabric"));
         assert_eq!(loader_facet(ModLoader::Vanilla), None);
+    }
+
+    #[test]
+    fn cache_roundtrip_and_ttl_expiry() {
+        let map: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        cache_put(&map, "k".into(), 42u32);
+        assert_eq!(cache_get(&map, "k", Duration::from_secs(60)), Some(42));
+        assert_eq!(cache_get(&map, "k", Duration::ZERO), None);
+    }
+
+    #[test]
+    fn cache_missing_key_is_none() {
+        let map: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        assert_eq!(cache_get(&map, "nope", Duration::from_secs(60)), None);
+    }
+
+    #[test]
+    fn cache_put_clears_when_over_capacity() {
+        let map: Mutex<HashMap<String, (Instant, u32)>> = Mutex::new(HashMap::new());
+        for i in 0..MAX_CACHE_ENTRIES {
+            cache_put(&map, format!("k{i}"), i as u32);
+        }
+        assert_eq!(map.lock().unwrap().len(), MAX_CACHE_ENTRIES);
+        cache_put(&map, "fresh".into(), 1);
+        let guard = map.lock().unwrap();
+        assert_eq!(guard.len(), 1);
+        assert!(guard.contains_key("fresh"));
+    }
+
+    #[tokio::test]
+    async fn search_is_cached_per_query() {
+        let server = wiremock::MockServer::start().await;
+        let body = || serde_json::json!({ "hits": [], "total_hits": 0 });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::query_param("query", "sodium"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::query_param("query", "sodium2"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HttpClient::new();
+        let base = server.uri();
+
+        let first = search_from(&client, &base, "sodium", "mod", Some("1.20.1"), Some(ModLoader::Fabric), 0, 40)
+            .await
+            .unwrap();
+        let second = search_from(&client, &base, "sodium", "mod", Some("1.20.1"), Some(ModLoader::Fabric), 0, 40)
+            .await
+            .unwrap();
+        assert_eq!(first.total_hits, second.total_hits);
+
+        search_from(&client, &base, "sodium2", "mod", Some("1.20.1"), Some(ModLoader::Fabric), 0, 40)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn versions_are_cached_per_project() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/project/abc/version"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!([])),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = HttpClient::new();
+        let base = server.uri();
+
+        let first = get_project_versions_from(&client, &base, "abc", Some("1.20.1"), Some(ModLoader::Fabric))
+            .await
+            .unwrap();
+        let second = get_project_versions_from(&client, &base, "abc", Some("1.20.1"), Some(ModLoader::Fabric))
+            .await
+            .unwrap();
+        assert_eq!(first.len(), second.len());
     }
 
     #[tokio::test]

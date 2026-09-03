@@ -141,8 +141,8 @@ fn meta_with_one_library(server_uri: &str) -> VersionMeta {
                 artifact: Some(Artifact {
                     url: format!("{server_uri}/slf4j.jar"),
                     path: "org/slf4j/slf4j-api/2.0.7/slf4j-api-2.0.7.jar".to_string(),
-                    sha1: "0".repeat(40),
-                    size: 11,
+                    sha1: "04e2ebe8b7b182c63c2834f4984aae2901150df1".to_string(),
+                    size: 9,
                 }),
             },
             rules: None,
@@ -213,26 +213,22 @@ async fn download_assets_from_writes_index_and_assets() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "objects": {
-                "minecraft/lang/en_us.json": {
-                    "hash": "ab1234567890abcdef1234567890abcdef123456",
-                    "size": 11
-                }
-            }
-        })))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(
+            br#"{"objects":{"minecraft/lang/en_us.json":{"hash":"a4b45e57b3934836f20ccf8529c18bcd1e120129","size":11}}}"#.to_vec(),
+        ))
         .expect(1)
         .mount(&server)
         .await;
-    // asset hash starts with "ab" so the per-asset URL is /<base>/ab/<hash>.
+    // asset hash starts with "a4" so the per-asset URL is /<base>/a4/<hash>.
     Mock::given(method("GET"))
-        .and(path("/cdn/ab/ab1234567890abcdef1234567890abcdef123456"))
+        .and(path("/cdn/a4/a4b45e57b3934836f20ccf8529c18bcd1e120129"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"asset-bytes".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = "35749cd553b6d802b5e98bfe2199d3572beb9159".to_string();
     let tmp = tempfile::tempdir().unwrap();
     let cdn_base = format!("{}/cdn", server.uri());
 
@@ -244,7 +240,7 @@ async fn download_assets_from_writes_index_and_assets() {
     assert!(index_path.exists(), "index file missing");
     let asset_path = tmp
         .path()
-        .join("assets/objects/ab/ab1234567890abcdef1234567890abcdef123456");
+        .join("assets/objects/a4/a4b45e57b3934836f20ccf8529c18bcd1e120129");
     assert!(asset_path.exists(), "asset file missing");
     assert_eq!(std::fs::read(&asset_path).unwrap(), b"asset-bytes");
 }
@@ -257,12 +253,13 @@ async fn download_assets_writes_index_when_objects_is_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/assets/index.json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"objects": {}})))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"{\"objects\":{}}".to_vec()))
         .expect(1)
         .mount(&server)
         .await;
 
-    let meta = meta_with_one_library(&server.uri());
+    let mut meta = meta_with_one_library(&server.uri());
+    meta.asset_index.sha1 = "62ea787c1f800c091b98678b050453a5ae59d7bc".to_string();
     let tmp = tempfile::tempdir().unwrap();
 
     download_assets(&HttpClient::new(), &meta, tmp.path())

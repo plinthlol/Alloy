@@ -125,7 +125,13 @@ async fn exchange_and_build_account(
     };
 
     if !profile_resp.status().is_success() {
-        return AuthResult::Error("Account does not own Minecraft".to_owned());
+        let status = profile_resp.status();
+        let message = if status.as_u16() == 404 {
+            "Account does not own Minecraft".to_owned()
+        } else {
+            format!("Profile fetch failed: profile endpoint returned {status}")
+        };
+        return AuthResult::Error(message);
     }
 
     let profile: McProfile = match profile_resp.json().await {

@@ -410,6 +410,8 @@ impl InstanceManager {
             );
         }
 
+        crate::running::rename_tracked(old_name, new_name);
+
         Ok(())
     }
 

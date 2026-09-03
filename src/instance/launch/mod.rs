@@ -649,13 +649,37 @@ pub async fn launch(
         let (code, killed_by_user) = tokio::select! {
             _ = kill_rx => {
                 tracing::info!("[{}] Kill requested, terminating process", name_for_task);
-                let output = std::process::Command::new("kill")
-                    .arg(&child_pid.to_string())
-                    .output();
-                if let Err(e) = output {
-                    tracing::warn!("[{}] Failed to kill process: {}", name_for_task, e);
+                terminate_process(child_pid);
+                let mut died = false;
+                for _ in 0..KILL_GRACE_POLLS {
+                    if !crate::running::pid_is_alive(child_pid) {
+                        died = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(KILL_POLL_MS)).await;
                 }
-                (None, true)
+                if !died {
+                    tracing::warn!(
+                        "[{}] Process still alive after graceful kill, escalating",
+                        name_for_task
+                    );
+                    force_kill_process(child_pid);
+                    for _ in 0..KILL_GRACE_POLLS {
+                        if !crate::running::pid_is_alive(child_pid) {
+                            died = true;
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(KILL_POLL_MS)).await;
+                    }
+                }
+                if !died {
+                    tracing::error!(
+                        "[{}] Process survived kill attempt (pid {})",
+                        name_for_task,
+                        child_pid
+                    );
+                }
+                (None, died)
             }
             result = tokio::task::spawn_blocking(move || {
                 child.wait().ok().and_then(|s| s.code())
@@ -710,6 +734,37 @@ fn pipe_to_tokio_file<T: Into<std::os::fd::OwnedFd>>(pipe: T) -> tokio::fs::File
 #[cfg(windows)]
 fn pipe_to_tokio_file<T: Into<std::os::windows::io::OwnedHandle>>(pipe: T) -> tokio::fs::File {
     tokio::fs::File::from_std(std::fs::File::from(pipe.into()))
+}
+
+const KILL_GRACE_POLLS: usize = 50;
+const KILL_POLL_MS: u64 = 100;
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .output();
+}
+
+#[cfg(unix)]
+fn force_kill_process(pid: u32) {
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn force_kill_process(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
 }
 
 fn emit_parsed_instance_log(

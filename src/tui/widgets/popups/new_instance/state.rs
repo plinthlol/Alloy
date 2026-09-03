@@ -1006,7 +1006,7 @@ pub(crate) fn ensure_loader_versions_loaded(
 
 // how long to wait after the last keystroke before firing a search, so
 // typing a name fans out one API call instead of one per character.
-const SEARCH_DEBOUNCE_MS: u64 = 300;
+const SEARCH_DEBOUNCE_MS: u64 = 200;
 
 // schedules a debounced modpack search: bumps the generation counter
 // (invalidating any earlier pending debounce) and spawns a task that fires
@@ -1032,10 +1032,10 @@ fn schedule_modpack_search(state: &mut WizardState) {
 // an explicit user-initiated search, not a lazy one-shot load.
 pub(crate) fn ensure_modpack_search(state: &mut WizardState) {
     let query = state.modpack_query.value().trim().to_string();
-    // live-search dedup: skip when the identical query just fired for this
-    // source (Enter after the debounce, or a trailing-space-only edit).
+    let errored = matches!(state.modpack_results, LoadState::Error(_));
     if query == state.modpack_last_searched_query
         && !matches!(state.modpack_results, LoadState::Idle)
+        && !errored
     {
         return;
     }

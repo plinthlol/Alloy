@@ -147,14 +147,6 @@ pub fn render_search_step(
                                 .add_modifier(Modifier::BOLD),
                         ));
                     }
-                    title_line.push(Span::styled(
-                        format!(
-                            "  by {}  \u{b7}  {} downloads",
-                            hit.author(),
-                            crate::util::format_count(hit.downloads())
-                        ),
-                        Style::default().fg(theme.text_dim()),
-                    ));
                     let lines = vec![
                         Line::from(title_line),
                         Line::from(vec![

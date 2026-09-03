@@ -68,7 +68,7 @@ pub fn remove_pid_file(name: &str) {
 // the *same* process — pid-reuse in that narrow window is rare enough to
 // ignore.
 #[cfg(unix)]
-fn pid_is_alive(pid: u32) -> bool {
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
     // SAFETY: kill(pid, 0) sends no signal, just validates the pid.
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if result == 0 {
@@ -81,7 +81,7 @@ fn pid_is_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn pid_is_alive(pid: u32) -> bool {
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
     // no libc signal-0 on windows; ask tasklist. best-effort, same spirit.
     std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH"])
@@ -248,6 +248,33 @@ pub fn cleanup_kill_sender(name: &str) {
     if let Ok(mut map) = KILL_SENDERS.lock() {
         map.remove(name);
     }
+}
+
+pub fn rename_tracked(old_name: &str, new_name: &str) {
+    if let Ok(mut map) = RUNNING.lock()
+        && let Some(state) = map.remove(old_name)
+    {
+        map.insert(new_name.to_string(), state);
+    }
+    if let Ok(mut map) = KILL_SENDERS.lock()
+        && let Some(tx) = map.remove(old_name)
+    {
+        map.insert(new_name.to_string(), tx);
+    }
+    let old_path = pid_file_path(old_name);
+    if old_path.exists() {
+        let dir = pid_dir();
+        if std::fs::create_dir_all(&dir).is_ok() {
+            if let Err(e) = std::fs::rename(&old_path, pid_file_path(new_name)) {
+                tracing::warn!(
+                    "Failed to move pidfile {} for rename: {}",
+                    old_path.display(),
+                    e
+                );
+            }
+        }
+    }
+    crate::tui::request_redraw();
 }
 
 #[cfg(test)]

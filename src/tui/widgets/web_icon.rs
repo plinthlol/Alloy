@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use ratatui_image::protocol::StatefulProtocol;
 
@@ -43,17 +44,19 @@ struct PendingIcon {
 pub struct WebIconCache {
     protocols: HashMap<String, StatefulProtocol>,
     requested: HashSet<String>,
-    failed: HashSet<String>,
+    failed: Arc<Mutex<HashMap<String, Instant>>>,
     pending: Arc<Mutex<Vec<PendingIcon>>>,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
+
+const RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
 impl Default for WebIconCache {
     fn default() -> Self {
         Self {
             protocols: HashMap::new(),
             requested: HashSet::new(),
-            failed: HashSet::new(),
+            failed: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(Vec::new())),
             semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FETCHES)),
         }
@@ -67,6 +70,12 @@ pub static WEB_ICONS: LazyLock<Mutex<WebIconCache>> = LazyLock::new(|| Mutex::ne
 // a cold pool for each in-flight fetch. safe to share — the client is
 // immutable connection state (see net::HttpClient), never per-request data.
 static ICON_HTTP: LazyLock<crate::net::HttpClient> = LazyLock::new(crate::net::HttpClient::new);
+
+fn mark_failed(failed: &Mutex<HashMap<String, Instant>>, url: &str) {
+    if let Ok(mut failed) = failed.lock() {
+        failed.insert(url.to_string(), Instant::now());
+    }
+}
 
 fn disk_cache_dir() -> PathBuf {
     dirs::cache_dir()
@@ -220,11 +229,23 @@ impl WebIconCache {
     /// frame for every currently-visible row - only actually spawns work
     /// the first time a given url is seen.
     pub fn request(&mut self, url: &str) {
-        if url.is_empty()
-            || self.protocols.contains_key(url)
-            || self.failed.contains(url)
-            || !self.requested.insert(url.to_string())
-        {
+        if url.is_empty() || self.protocols.contains_key(url) {
+            return;
+        }
+        if let Ok(failed) = self.failed.lock() {
+            match failed.get(url) {
+                Some(at) if at.elapsed() < RETRY_COOLDOWN => return,
+                Some(_) => {
+                    drop(failed);
+                    if let Ok(mut f) = self.failed.lock() {
+                        f.remove(url);
+                    }
+                    self.requested.remove(url);
+                }
+                None => {}
+            }
+        }
+        if !self.requested.insert(url.to_string()) {
             return;
         }
 
@@ -232,6 +253,7 @@ impl WebIconCache {
 
         let url_owned = url.to_string();
         let pending = self.pending.clone();
+        let failed = self.failed.clone();
         let semaphore = self.semaphore.clone();
 
         tokio::spawn(async move {
@@ -267,6 +289,7 @@ impl WebIconCache {
                     }
                     None => {
                         tracing::debug!("Failed to decode icon {}", url_owned);
+                        mark_failed(&failed, &url_owned);
                     }
                 }
                 return;
@@ -282,6 +305,7 @@ impl WebIconCache {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     tracing::debug!("Failed to fetch icon {}: {}", url_owned, e);
+                    mark_failed(&failed, &url_owned);
                     return;
                 }
             };
@@ -301,6 +325,7 @@ impl WebIconCache {
                 Some(processed) => processed,
                 None => {
                     tracing::debug!("Failed to decode icon {}", url_owned);
+                    mark_failed(&failed, &url_owned);
                     return;
                 }
             };

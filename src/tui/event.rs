@@ -302,8 +302,14 @@ impl App {
                         message: format!("Installed '{file_name}'"),
                         pushed_at: std::time::Instant::now(),
                     });
+                    if !params.key.is_empty() {
+                        content_browse::confirm_installed(&params.key, &file_name);
+                    }
                 }
                 Err(e) => {
+                    if !params.key.is_empty() {
+                        content_browse::clear_installed(&params.key);
+                    }
                     error_buffer::push_error(error_buffer::ErrorEvent {
                         id: 0,
                         level: tracing::Level::ERROR,
@@ -441,6 +447,12 @@ impl App {
             if let Err(e) = launch::launch(&instance, &instances_dir, &meta_dir).await {
                 tracing::error!("Failed to launch '{}': {}", instance.name, e);
                 running::remove(&instance.name);
+                error_buffer::push_error(error_buffer::ErrorEvent {
+                    id: 0,
+                    level: tracing::Level::ERROR,
+                    message: format!("Failed to launch '{}': {e}", instance.name),
+                    pushed_at: std::time::Instant::now(),
+                });
             }
         });
     }

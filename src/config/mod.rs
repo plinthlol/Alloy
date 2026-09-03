@@ -86,13 +86,80 @@ pub fn load_config(config_path: &std::path::Path) -> Result<Config, ConfigLoadEr
 // screen). SETTINGS is read once at startup, so this only touches disk —
 // the running process keeps its loaded values until restarted.
 pub fn save_config(config: &Config) -> Result<(), ConfigLoadError> {
-    let path = get_config_path().join("config.toml");
-    let toml_str = toml::to_string_pretty(config)?;
+    save_config_to(&get_config_path().join("config.toml"), config)
+}
+
+fn save_config_to(path: &std::path::Path, config: &Config) -> Result<(), ConfigLoadError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&path, toml_str)?;
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    let out = match existing.parse::<toml_edit::DocumentMut>() {
+        Ok(mut doc) => {
+            apply_config_to_doc(&mut doc, config);
+            doc.to_string()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Config file at {} failed to parse ({}); rewriting without preserving comments",
+                path.display(),
+                e
+            );
+            toml::to_string_pretty(config)?
+        }
+    };
+    fs::write(path, out)?;
     Ok(())
+}
+
+fn ensure_table(doc: &mut toml_edit::DocumentMut, name: &str) {
+    if !doc.contains_key(name) {
+        doc.insert(name, toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+}
+
+fn set_str(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: &str) {
+    ensure_table(doc, table);
+    doc[table][key] = toml_edit::value(value);
+}
+
+fn set_opt_str(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: &Option<String>) {
+    ensure_table(doc, table);
+    match value {
+        Some(v) if !v.is_empty() => doc[table][key] = toml_edit::value(v.as_str()),
+        _ => {
+            doc[table][key] = toml_edit::Item::None;
+        }
+    }
+}
+
+fn set_int(doc: &mut toml_edit::DocumentMut, table: &str, key: &str, value: u64) {
+    ensure_table(doc, table);
+    doc[table][key] = toml_edit::value(value as i64);
+}
+
+fn apply_config_to_doc(doc: &mut toml_edit::DocumentMut, config: &Config) {
+    set_str(doc, "paths", "instances_dir", &config.paths.instances_dir);
+    set_str(doc, "paths", "meta_dir", &config.paths.meta_dir);
+    set_opt_str(doc, "paths", "java_path", &config.paths.java_path);
+
+    set_str(doc, "defaults", "memory_min", &config.defaults.memory_min);
+    set_str(doc, "defaults", "memory_max", &config.defaults.memory_max);
+
+    let protocol = match config.ui.image_protocol {
+        settings::ImageProtocol::Halfblocks => "halfblocks",
+        settings::ImageProtocol::Quadrants => "quadrants",
+        settings::ImageProtocol::Sixel => "sixel",
+        settings::ImageProtocol::Kitty => "kitty",
+        settings::ImageProtocol::Iterm2 => "iterm2",
+    };
+    set_str(doc, "ui", "image_protocol", protocol);
+    set_int(doc, "ui", "error_auto_dismiss_ms", config.ui.error_auto_dismiss_ms);
+    set_int(doc, "ui", "error_slide_start_ms", config.ui.error_slide_start_ms);
+    set_int(doc, "ui", "error_fly_out_ms", config.ui.error_fly_out_ms);
+    set_int(doc, "ui", "max_error_events", config.ui.max_error_events as u64);
+
+    set_opt_str(doc, "curseforge", "api_key", &config.curseforge.api_key);
 }
 
 pub static SETTINGS: LazyLock<Config> = LazyLock::new(|| {
@@ -161,5 +228,39 @@ mod tests {
         let config = load_config(&path).unwrap();
         assert_eq!(config.paths.instances_dir, "/custom/path");
         assert!(config.paths.java_path.is_none());
+    }
+
+    #[test]
+    fn save_config_preserves_comments_and_formatting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my precious comments\n[paths]\n# about java\njava_path = \"/old/java\"\n",
+        )
+        .unwrap();
+
+        let mut config = load_config(&path).unwrap();
+        config.paths.java_path = Some("/new/java".to_string());
+        save_config_to(&path, &config).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# my precious comments"));
+        assert!(written.contains("# about java"));
+        assert!(written.contains("java_path = \"/new/java\""));
+        assert!(!written.contains("/old/java"));
+    }
+
+    #[test]
+    fn save_config_falls_back_to_rewrite_on_unparseable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "not [ valid toml").unwrap();
+
+        let config: Config = toml::from_str("").unwrap();
+        save_config_to(&path, &config).unwrap();
+
+        let reloaded = load_config(&path).unwrap();
+        assert_eq!(reloaded.defaults.memory_max, "2G");
     }
 }

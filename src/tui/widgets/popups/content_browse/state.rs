@@ -162,6 +162,21 @@ pub fn is_open() -> bool {
     BROWSE_STATE.lock().map(|s| s.open).unwrap_or(false)
 }
 
+pub fn clear_installed(key: &str) {
+    if let Ok(mut state) = BROWSE_STATE.lock() {
+        state.installed.remove(key);
+        state.pending_install = false;
+    }
+    crate::tui::request_redraw();
+}
+
+pub fn confirm_installed(key: &str, filename: &str) {
+    if let Ok(mut state) = BROWSE_STATE.lock() {
+        state.installed.insert(key.to_string(), filename.to_string());
+    }
+    crate::tui::request_redraw();
+}
+
 // opens the popup for a specific instance's mods/resourcepacks dir — called
 // from the global keybind handler when 'b' is pressed on a content tab.
 pub fn open(kind: ContentKind, instance_name: String, dest_dir: PathBuf, game_version: String, loader: ModLoader) {
@@ -483,7 +498,7 @@ fn handle_version_key(state: &mut ContentBrowseState, key_event: &KeyEvent) {
 
 // how long to wait after the last keystroke before firing a search, so
 // typing a name fans out one API call instead of one per character.
-const SEARCH_DEBOUNCE_MS: u64 = 300;
+const SEARCH_DEBOUNCE_MS: u64 = 200;
 
 // schedules a debounced search: bumps the generation counter (invalidating
 // any earlier pending debounce) and spawns a task that fires only if it
@@ -505,9 +520,8 @@ fn schedule_search(state: &mut ContentBrowseState) {
 
 fn ensure_search(state: &mut ContentBrowseState) {
     let query = state.query.value().trim().to_string();
-    // live-search dedup: skip when the identical query just fired for this
-    // source (Enter after the debounce, or a trailing-space-only edit).
-    if query == state.last_searched_query && !matches!(state.results, LoadState::Idle) {
+    let errored = matches!(state.results, LoadState::Error(_));
+    if query == state.last_searched_query && !matches!(state.results, LoadState::Idle) && !errored {
         return;
     }
     state.last_searched_query = query.clone();
