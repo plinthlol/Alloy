@@ -43,7 +43,7 @@ Navigate with `j`/`k`, manage accounts with `A`, play with `Ctrl+Enter`.
 ## Build
 
 ```sh
-cargo build --release   # needs Rust (2024 edition) and a JDK
+cargo build --release
 ```
 
 ## License
