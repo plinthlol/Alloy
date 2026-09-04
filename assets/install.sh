@@ -131,7 +131,9 @@ if [ "$(uname -s)" = "Linux" ] && [ "$VARIANT" = "tui" ]; then
     fi
     TERM_EMU=""
     TERM_EXEC_FLAG="-e"
-    if [ -n "${TERMINAL:-}" ] && command -v "${TERMINAL%% *}" >/dev/null 2>&1; then
+    if [ -n "${TERM:-}" ] && command -v "${TERM%% *}" >/dev/null 2>&1; then
+        TERM_EMU="$TERM"
+    elif [ -n "${TERMINAL:-}" ] && command -v "${TERMINAL%% *}" >/dev/null 2>&1; then
         TERM_EMU="$TERMINAL"
     else
         for t in foot kitty alacritty wezterm konsole gnome-terminal xfce4-terminal xterm; do
