@@ -44,33 +44,21 @@ case "$(uname -s)" in
     MINGW64*|MSYS*|CYGWIN*|Windows_NT) EXE=".exe" ;;
 esac
 
-if [[ -n "${ALLOY_VARIANT:-}" ]]; then
-    VARIANT="$ALLOY_VARIANT"
-elif [[ -t 0 && -t 1 && -r /dev/tty ]]; then
-    # Only prompt when this script's own stdin/stdout are a real terminal.
-    # `curl | bash` makes stdin a pipe, so -t 0 is false there and we fall
-    # through to the non-interactive default below instead of blocking
-    # on a /dev/tty read that may never get an answer.
-    echo
-    echo "Select Alloy variant:"
-    echo "  1) alloysh  (TUI, recommended)"
-    echo "  2) alloyctl (CLI)"
-    printf "Enter choice [1-2]: "
-    if read -r choice < /dev/tty; then
-        case "$choice" in
-            1|"") VARIANT="tui" ;;
-            2) VARIANT="cli" ;;
-            *) die "invalid choice '$choice' (use 1 or 2)" ;;
-        esac
-    else
-        echo "No input received; defaulting to alloysh (TUI)." >&2
-        VARIANT="tui"
-    fi
-else
-    echo "Non-interactive session detected; defaulting to alloysh (TUI)." >&2
-    echo "Set ALLOY_VARIANT=tui|cli to choose explicitly." >&2
-    VARIANT="tui"
+echo
+echo "Select Alloy variant:"
+echo "  1) alloysh  (TUI, recommended)"
+echo "  2) alloyctl (CLI)"
+printf "Enter choice [1-2]: "
+
+if ! read -r choice < /dev/tty; then
+    die "no terminal available to read input (run this in a terminal, not e.g. < /dev/null)"
 fi
+
+case "$choice" in
+    1|"") VARIANT="tui" ;;
+    2) VARIANT="cli" ;;
+    *) die "invalid choice '$choice' (use 1 or 2)" ;;
+esac
 
 case "$VARIANT" in
     tui) BINARY="alloysh${EXE}" ;;
