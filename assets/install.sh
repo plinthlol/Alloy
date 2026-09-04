@@ -51,7 +51,13 @@ esac
 
 PLATFORM=$(detect_platform)
 ARTIFACT="${BINARY%"$EXE"}-${PLATFORM}${EXE}"
-mkdir -p "$BIN_DIR"
+mkdir -p "$BIN_DIR" || { echo "error: cannot create directory '$BIN_DIR'" >&2; exit 1; }
+if ! touch "$BIN_DIR/.alloy-write-test" 2>/dev/null; then
+    echo "error: cannot write to '$BIN_DIR' (permission denied)" >&2
+    ls -ld "$BIN_DIR" >&2 || true
+    exit 1
+fi
+rm -f "$BIN_DIR/.alloy-write-test"
 TARGET="$BIN_DIR/$BINARY"
 
 if [ "$TARGET_VERSION" = "latest" ]; then
@@ -61,7 +67,24 @@ else
 fi
 
 echo "Downloading $ARTIFACT..."
-curl -fsSL -o "$TARGET" "$BASE/$ARTIFACT" || { rm -f "$TARGET"; echo "error: download failed" >&2; exit 1; }
+TMP="$TARGET.tmp.$$"
+rm -f "$TMP"
+# Download to a temp file first (never clobber a good binary on failure,
+# and never truncate a currently-running executable in place — Linux
+# refuses that with ETXTBSY, which curl surfaces as error 23).
+if ! curl -fSL --show-error --retry 3 -o "$TMP" "$BASE/$ARTIFACT"; then
+    rc=$?
+    rm -f "$TMP"
+    echo "error: download failed (curl exit $rc)" >&2
+    if [ "$rc" -eq 23 ]; then
+        echo "hint: curl could not write the download to disk." >&2
+        echo "hint: check disk space with: df -h \"$BIN_DIR\"" >&2
+        echo "hint: check permissions with: ls -ld \"$BIN_DIR\"; ls -l \"$TARGET\"" >&2
+        echo "hint: if $BINARY is currently running, quit it and retry." >&2
+    fi
+    exit 1
+fi
+mv -f "$TMP" "$TARGET"
 chmod +x "$TARGET"
 
 # Verify checksum (best-effort; skipped if no .sha256 asset is published)
