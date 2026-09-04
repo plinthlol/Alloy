@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::Tui;
 use super::app::App;
-use super::widgets::{self, popups::content_browse, popups::new_instance};
+use super::widgets::{self, popups::content_browse, popups::description, popups::new_instance};
 use crate::instance::InstanceManager;
 use crate::tui::error_buffer;
 use crate::tui::progress;
@@ -26,6 +26,16 @@ impl App {
             // LastPlayed events it emits drain and persist in this frame.
             crate::running::reap_dead_orphans();
             self.content.tick(&self.picker);
+
+            let overlay_open = content_browse::is_open()
+                || description::is_open()
+                || self.instances_state.show_popup
+                || self.focused == super::app::FocusedArea::OverviewExpanded
+                || self.focused == super::app::FocusedArea::GlobalSettings;
+            if self.overlay_was_open && !overlay_open {
+                self.content.invalidate_image_protocols();
+            }
+            self.overlay_was_open = overlay_open;
 
             // one typed channel carries every background-task/popup
             // notification into the loop.

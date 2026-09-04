@@ -169,6 +169,12 @@ impl ScreenshotsState {
         self.failed.insert(idx);
     }
 
+    pub fn invalidate_protocols(&mut self) {
+        self.protocols.clear();
+        self.failed.clear();
+        self.requested.clear();
+    }
+
     // only load images that are currently visible (or about to be).
     // no point decoding a 4K screenshot the user can't even see yet
     pub fn request_visible_loads(&mut self) {

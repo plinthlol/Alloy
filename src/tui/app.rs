@@ -44,6 +44,7 @@ pub struct App {
     // which "thing" the JavaSelect popup is currently picking a runtime
     // for, so Pick(path) lands in the right place
     pub(super) java_select_target: JavaSelectTarget,
+    pub(super) overlay_was_open: bool,
 }
 
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
@@ -116,6 +117,7 @@ impl App {
             content_renaming: None,
             restart_requested: false,
             java_select_target: JavaSelectTarget::default(),
+            overlay_was_open: false,
         }
     }
 

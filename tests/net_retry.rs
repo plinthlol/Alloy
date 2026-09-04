@@ -15,7 +15,7 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use alloy::net::{HttpClient, download_file};
+use alloy::net::{HttpClient, NetError, download_file};
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
@@ -159,4 +159,66 @@ async fn download_file_fails_fast_on_4xx() {
         format!("{err:?}").contains("404"),
         "expected 404 in error, got: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn get_json_retries_non_json_body_then_succeeds() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(
+                    b"<html><body>upstream hiccup</body></html>".to_vec(),
+                    "text/html; charset=utf-8",
+                ),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/api", server.uri());
+    let result: ApiResponse = HttpClient::new().get_json(&url).await.unwrap();
+    assert!(result.ok);
+}
+
+#[tokio::test]
+async fn get_json_bad_json_error_is_descriptive() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(b"<html>boom</html>".to_vec(), "text/html"),
+        )
+        .expect(4)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/api", server.uri());
+    let err = HttpClient::new()
+        .get_json::<ApiResponse>(&url)
+        .await
+        .unwrap_err();
+    let NetError::BadJson {
+        url: err_url,
+        status,
+        snippet,
+    } = err
+    else {
+        panic!("expected BadJson, got: {err:?}")
+    };
+    assert_eq!(err_url, url);
+    assert_eq!(status, 200);
+    assert!(snippet.contains("text/html"));
+    assert!(snippet.contains("<html>boom</html>"));
 }

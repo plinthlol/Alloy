@@ -24,6 +24,8 @@ use crate::instance::content::mods::{ContentEntry, IconCell};
 
 type ScanOneFn = fn(&Path, &str, bool) -> ContentEntry;
 
+const IMAGE_REBUILD_PER_TICK: usize = 32;
+
 // per-instance snapshot kept across switches (see ContentListState::cache):
 // the scanned entries plus the UI position and the already-decoded icon
 // protocols. keeping the protocols with the entries means switching back to
@@ -33,6 +35,7 @@ struct CachedList {
     entries: Vec<ContentEntry>,
     selected: Option<usize>,
     image_protocols: HashMap<String, StatefulProtocol>,
+    decoded_images: HashMap<String, image::DynamicImage>,
 }
 
 struct PendingContentImage {
@@ -66,6 +69,7 @@ pub struct ContentListState {
     pub loaded_for: Option<String>,
     pub loading: bool,
     image_protocols: HashMap<String, StatefulProtocol>,
+    decoded_images: HashMap<String, image::DynamicImage>,
     requested_images: HashSet<String>,
     pending_images: Arc<Mutex<Vec<PendingContentImage>>>,
     images_dirty: bool,
@@ -108,6 +112,7 @@ impl Default for ContentListState {
             loaded_for: None,
             loading: false,
             image_protocols: HashMap::new(),
+            decoded_images: HashMap::new(),
             requested_images: HashSet::new(),
             pending_images: Arc::new(Mutex::new(Vec::new())),
             images_dirty: true,
@@ -153,6 +158,7 @@ impl ContentListState {
             return;
         }
         self.images_dirty = false;
+        let mut rebuilt = 0usize;
 
         let use_image_protocol =
             picker.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks;
@@ -169,6 +175,8 @@ impl ContentListState {
             .collect();
         self.image_protocols
             .retain(|stem, _| valid_stems.contains(stem.as_str()));
+        self.decoded_images
+            .retain(|stem, _| valid_stems.contains(stem.as_str()));
         self.requested_images
             .retain(|stem| valid_stems.contains(stem.as_str()));
 
@@ -183,8 +191,23 @@ impl ContentListState {
         let semaphore = self.image_load_semaphore.clone();
 
         for entry in &self.entries {
-            if entry.icon_bytes.is_none() || !self.requested_images.insert(entry.file_stem.clone())
-            {
+            if entry.icon_bytes.is_none() {
+                continue;
+            }
+            if !self.requested_images.insert(entry.file_stem.clone()) {
+                continue;
+            }
+            if let Some(image) = self.decoded_images.get(&entry.file_stem) {
+                if rebuilt >= IMAGE_REBUILD_PER_TICK {
+                    self.requested_images.remove(&entry.file_stem);
+                    self.images_dirty = true;
+                    continue;
+                }
+                rebuilt += 1;
+                self.image_protocols.insert(
+                    entry.file_stem.clone(),
+                    picker.new_resize_protocol(image.clone()),
+                );
                 continue;
             }
             let file_stem = entry.file_stem.clone();
@@ -260,11 +283,23 @@ impl ContentListState {
             {
                 entry.icon_lines = Some(result.icon_lines);
                 if let Some(image) = result.image {
+                    self.decoded_images
+                        .insert(result.file_stem.clone(), image.clone());
                     self.image_protocols
                         .insert(result.file_stem, picker.new_resize_protocol(image));
                 }
+            } else {
+                self.requested_images.remove(&result.file_stem);
+                self.images_dirty = true;
             }
         }
+    }
+
+    pub fn invalidate_image_protocols(&mut self) {
+        self.image_protocols.clear();
+        self.requested_images.clear();
+        self.sixel_drawn_rects.clear();
+        self.images_dirty = true;
     }
 
     // drain streaming entries from the initial load. each entry arrives
@@ -366,6 +401,7 @@ impl ContentListState {
                 .insert(entry.file_stem.clone(), display_metadata(&entry));
             self.requested_images.remove(&entry.file_stem);
             self.image_protocols.remove(&entry.file_stem);
+            self.decoded_images.remove(&entry.file_stem);
             if let Some(slot) = self
                 .entries
                 .iter_mut()
@@ -611,6 +647,7 @@ impl ContentListState {
                     // take the decoded protocols along so the next visit to
                     // this instance can restore them instead of re-decoding.
                     image_protocols: std::mem::take(&mut self.image_protocols),
+                    decoded_images: std::mem::take(&mut self.decoded_images),
                 },
             );
         }
@@ -623,6 +660,7 @@ impl ContentListState {
         self.image_protocols.clear();
         self.requested_images.clear();
         self.sixel_drawn_rects.clear();
+        self.decoded_images.clear();
 
         // try cache first
         if let Some(cached) = self.cache.remove(instance_name) {
@@ -634,6 +672,7 @@ impl ContentListState {
             // images_dirty stays true so stems that changed while we were
             // away (or weren't in the cache) still get decoded.
             self.image_protocols = cached.image_protocols;
+            self.decoded_images = cached.decoded_images;
             self.requested_images = self.image_protocols.keys().cloned().collect();
             self.loading = false;
             self.stream_rx = None;
@@ -825,6 +864,7 @@ impl ContentListState {
         self.entries.retain(|entry| entry.path != path);
         if let Some(file_stem) = file_stem {
             self.image_protocols.remove(&file_stem);
+            self.decoded_images.remove(&file_stem);
             self.requested_images.remove(&file_stem);
             self.display_metadata.remove(&file_stem);
         }

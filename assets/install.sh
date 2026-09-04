@@ -105,4 +105,50 @@ case ":$PATH:" in
         ;;
 esac
 
+# Linux + TUI only: install a launcher icon and a .desktop entry so alloysh
+# shows up in app launchers as a terminal application. Best-effort — a failed
+# icon download or cache refresh must never fail the install.
+if [ "$(uname -s)" = "Linux" ] && [ "$VARIANT" = "tui" ]; then
+    DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
+    ICON_BASE="https://raw.githubusercontent.com/$REPO/HEAD/assets"
+    icon_ok=true
+    for size in 128 256 512; do
+        icon_dir="$DATA_DIR/icons/hicolor/${size}x${size}/apps"
+        mkdir -p "$icon_dir"
+        if curl -fsSL -o "$icon_dir/alloy.png" "$ICON_BASE/icon-$size.png" 2>/dev/null; then
+            continue
+        fi
+        rm -f "$icon_dir/alloy.png"
+        icon_ok=false
+        break
+    done
+
+    if $icon_ok; then
+        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+            gtk-update-icon-cache -q -f -t "$DATA_DIR/icons/hicolor" 2>/dev/null || true
+        fi
+    else
+        echo "warning: could not download launcher icon; desktop entry will use a generic icon" >&2
+    fi
+
+    mkdir -p "$DATA_DIR/applications"
+    cat > "$DATA_DIR/applications/alloy.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Alloy
+GenericName=Minecraft Launcher
+Comment=A Minecraft launcher. Minimal but featureful.
+Exec="$TARGET"
+Terminal=true
+Icon=alloy
+Categories=Game;Utility;
+Keywords=minecraft;mods;modpack;launcher;
+StartupNotify=false
+EOF
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$DATA_DIR/applications" 2>/dev/null || true
+    fi
+    echo "✓ Created desktop entry at $DATA_DIR/applications/alloy.desktop"
+fi
+
 echo "✓ Installed $BINARY to $TARGET"

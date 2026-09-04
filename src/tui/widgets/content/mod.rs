@@ -84,6 +84,13 @@ impl ContentArea {
         self.logs.invalidate(name);
     }
 
+    pub fn invalidate_image_protocols(&mut self) {
+        self.mods.invalidate_image_protocols();
+        self.resource_packs.invalidate_image_protocols();
+        self.worlds.invalidate_image_protocols();
+        self.screenshots.invalidate_protocols();
+    }
+
     /// true when the active tab's selection is already at the top (or the
     /// list is empty), meaning another k/Up should open the instance rename
     /// field in the content header instead of moving the selection.

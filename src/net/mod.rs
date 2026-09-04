@@ -29,6 +29,12 @@ pub enum NetError {
     Parse(String),
     #[error("Server returned error status {status}: {url}")]
     StatusError { status: u16, url: String },
+    #[error("invalid JSON from {url} (status {status}, body: {snippet})")]
+    BadJson {
+        url: String,
+        status: u16,
+        snippet: String,
+    },
     #[error("Task failed: {0}")]
     TaskFailed(String),
 }
@@ -160,7 +166,12 @@ impl HttpClient {
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T, NetError> {
-        get_with_retry(self, url, |resp| async move { Ok(resp.json().await?) }).await
+        let url_owned = url.to_string();
+        get_with_retry(self, url, move |resp| {
+            let url = url_owned.clone();
+            async move { decode_json_response(resp, url).await }
+        })
+        .await
     }
 
     // header-carrying counterpart to `get_json`, retried the same way.
@@ -169,8 +180,12 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<T, NetError> {
-        get_with_retry_headers(self, url, headers, |resp| async move { Ok(resp.json().await?) })
-            .await
+        let url_owned = url.to_string();
+        get_with_retry_headers(self, url, headers, move |resp| {
+            let url = url_owned.clone();
+            async move { decode_json_response(resp, url).await }
+        })
+        .await
     }
 
     pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>, NetError> {
@@ -267,6 +282,38 @@ where
         }
     }
     unreachable!("retry loop returns on success or final error")
+}
+
+async fn decode_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+    url: String,
+) -> Result<T, NetError> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let bytes = response.bytes().await?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
+            .escape_debug()
+            .collect::<String>();
+        tracing::debug!(
+            "JSON decode failed for {} (status {}, content-type {}, {} bytes): {}",
+            url,
+            status,
+            content_type,
+            bytes.len(),
+            error
+        );
+        NetError::BadJson {
+            url,
+            status,
+            snippet: format!("{content_type}: {head}"),
+        }
+    })
 }
 
 async fn sleep_before_retry(kind: &str, url: &str, attempt: u32, err: &NetError) {
@@ -429,6 +476,7 @@ fn is_retryable(err: &NetError) -> bool {
     match err {
         NetError::Http(e) => e.is_timeout() || e.is_body() || e.is_connect(),
         NetError::StatusError { status, .. } => *status >= 500,
+        NetError::BadJson { .. } => true,
         _ => false,
     }
 }
