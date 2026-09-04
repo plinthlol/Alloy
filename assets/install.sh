@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# Alloy installer - downloads latest release and sets up PATH
-# Usage: curl -fsSL https://raw.githubusercontent.com/plinthlol/alloy/HEAD/assets/install.sh | bash
 set -euo pipefail
-
 REPO="plinthlol/alloy"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 TARGET_VERSION="${1:-latest}"
 EXE=""
-
 detect_platform() {
     case "$(uname -s)" in
         Linux)
@@ -21,10 +17,6 @@ detect_platform() {
         *) echo "error: unsupported platform '$(uname -s)'" >&2; exit 1 ;;
     esac
 }
-
-# Variant selection: ALLOY_VARIANT env var > interactive picker (via /dev/tty, so
-# this still works when the script itself is streamed in over stdin, e.g.
-# `curl ... | bash`) > default to tui when no terminal is available.
 if [ -n "${ALLOY_VARIANT:-}" ]; then
     VARIANT="$ALLOY_VARIANT"
 elif [ -r /dev/tty ]; then
@@ -42,13 +34,11 @@ else
     echo "No terminal detected, defaulting to alloysh (TUI). Set ALLOY_VARIANT=tui|cli to choose explicitly."
     VARIANT="tui"
 fi
-
 case "$VARIANT" in
     tui) BINARY="alloysh${EXE}" ;;
     cli) BINARY="alloyctl${EXE}" ;;
     *) echo "error: unknown variant '$VARIANT' (use tui or cli)" >&2; exit 1 ;;
 esac
-
 PLATFORM=$(detect_platform)
 ARTIFACT="${BINARY%"$EXE"}-${PLATFORM}${EXE}"
 mkdir -p "$BIN_DIR" || { echo "error: cannot create directory '$BIN_DIR'" >&2; exit 1; }
@@ -59,19 +49,14 @@ if ! touch "$BIN_DIR/.alloy-write-test" 2>/dev/null; then
 fi
 rm -f "$BIN_DIR/.alloy-write-test"
 TARGET="$BIN_DIR/$BINARY"
-
 if [ "$TARGET_VERSION" = "latest" ]; then
     BASE="https://github.com/$REPO/releases/latest/download"
 else
     BASE="https://github.com/$REPO/releases/download/$TARGET_VERSION"
 fi
-
 echo "Downloading $ARTIFACT..."
 TMP="$TARGET.tmp.$$"
 rm -f "$TMP"
-# Download to a temp file first (never clobber a good binary on failure,
-# and never truncate a currently-running executable in place — Linux
-# refuses that with ETXTBSY, which curl surfaces as error 23).
 if ! curl -fSL --show-error --retry 3 -o "$TMP" "$BASE/$ARTIFACT"; then
     rc=$?
     rm -f "$TMP"
@@ -86,8 +71,6 @@ if ! curl -fSL --show-error --retry 3 -o "$TMP" "$BASE/$ARTIFACT"; then
 fi
 mv -f "$TMP" "$TARGET"
 chmod +x "$TARGET"
-
-# Verify checksum (best-effort; skipped if no .sha256 asset is published)
 if curl -fsSL -o "$TARGET.sha256" "$BASE/$ARTIFACT.sha256" 2>/dev/null; then
     expected="$(head -c 64 "$TARGET.sha256" | tr -d '[:space:]')"
     if command -v sha256sum >/dev/null; then
@@ -106,8 +89,6 @@ if curl -fsSL -o "$TARGET.sha256" "$BASE/$ARTIFACT.sha256" 2>/dev/null; then
 else
     echo "warning: checksum verification skipped"
 fi
-
-# Add BIN_DIR to PATH in the user's shell rc file, if not already present
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
@@ -127,10 +108,6 @@ case ":$PATH:" in
         fi
         ;;
 esac
-
-# Linux + TUI only: install a launcher icon and a .desktop entry so alloysh
-# shows up in app launchers as a terminal application. Best-effort — a failed
-# icon download or cache refresh must never fail the install.
 if [ "$(uname -s)" = "Linux" ] && [ "$VARIANT" = "tui" ]; then
     DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
     ICON_BASE="https://raw.githubusercontent.com/$REPO/HEAD/assets"
@@ -145,7 +122,6 @@ if [ "$(uname -s)" = "Linux" ] && [ "$VARIANT" = "tui" ]; then
         icon_ok=false
         break
     done
-
     if $icon_ok; then
         if command -v gtk-update-icon-cache >/dev/null 2>&1; then
             gtk-update-icon-cache -q -f -t "$DATA_DIR/icons/hicolor" 2>/dev/null || true
@@ -153,16 +129,40 @@ if [ "$(uname -s)" = "Linux" ] && [ "$VARIANT" = "tui" ]; then
     else
         echo "warning: could not download launcher icon; desktop entry will use a generic icon" >&2
     fi
-
+    TERM_EMU=""
+    TERM_EXEC_FLAG="-e"
+    if [ -n "${TERMINAL:-}" ] && command -v "${TERMINAL%% *}" >/dev/null 2>&1; then
+        TERM_EMU="$TERMINAL"
+    else
+        for t in foot kitty alacritty wezterm konsole gnome-terminal xfce4-terminal xterm; do
+            if command -v "$t" >/dev/null 2>&1; then
+                TERM_EMU="$t"
+                [ "$t" = "gnome-terminal" ] && TERM_EXEC_FLAG="--"
+                break
+            fi
+        done
+    fi
     mkdir -p "$DATA_DIR/applications"
+    if [ -n "$TERM_EMU" ]; then
+        EXEC_LINE="$TERM_EMU $TERM_EXEC_FLAG $TARGET"
+        TERMINAL_KEY="false"
+    else
+        EXEC_LINE="$TARGET"
+        TERMINAL_KEY="true"
+        echo "warning: no terminal emulator found; desktop entry uses Terminal=true," >&2
+        echo "         which some launchers (fuzzel, rofi, wofi, ...) don't honor." >&2
+        echo "         Install a terminal (foot, kitty, alacritty, ...) and re-run" >&2
+        echo "         this installer to fix launcher entries automatically." >&2
+    fi
     cat > "$DATA_DIR/applications/alloy.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Alloy
 GenericName=Minecraft Launcher
 Comment=A Minecraft launcher. Minimal but featureful.
-Exec="$TARGET"
-Terminal=true
+Exec=$EXEC_LINE
+TryExec=$TARGET
+Terminal=$TERMINAL_KEY
 Icon=alloy
 Categories=Game;Utility;
 Keywords=minecraft;mods;modpack;launcher;
@@ -171,7 +171,10 @@ EOF
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "$DATA_DIR/applications" 2>/dev/null || true
     fi
-    echo "✓ Created desktop entry at $DATA_DIR/applications/alloy.desktop"
+    if [ -n "$TERM_EMU" ]; then
+        echo "✓ Created desktop entry at $DATA_DIR/applications/alloy.desktop (using $TERM_EMU)"
+    else
+        echo "✓ Created desktop entry at $DATA_DIR/applications/alloy.desktop"
+    fi
 fi
-
 echo "✓ Installed $BINARY to $TARGET"
