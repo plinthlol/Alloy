@@ -5,7 +5,6 @@ set -euo pipefail
 REPO="plinthlol/alloy"
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 TARGET_VERSION="${1:-latest}"
-
 EXE=""
 
 die() {
@@ -21,15 +20,9 @@ detect_platform() {
     case "$os" in
         Linux)
             case "$arch" in
-                x86_64)
-                    echo "linux-x86_64"
-                    ;;
-                aarch64|arm64)
-                    die "Linux ARM64 builds are not published yet (only x86_64)."
-                    ;;
-                *)
-                    die "unsupported Linux architecture '$arch'"
-                    ;;
+                x86_64) echo "linux-x86_64" ;;
+                aarch64|arm64) die "Linux ARM64 builds are not published yet (only x86_64)." ;;
+                *) die "unsupported Linux architecture '$arch'" ;;
             esac
             ;;
         Darwin)
@@ -53,13 +46,12 @@ elif [[ -r /dev/tty ]]; then
     echo "  1) alloysh  (TUI, recommended)"
     echo "  2) alloyctl (CLI)"
     printf "Enter choice [1-2]: "
-
     read -r choice < /dev/tty
 
     case "$choice" in
         1|"") VARIANT="tui" ;;
-        2)    VARIANT="cli" ;;
-        *)    die "invalid choice '$choice' (use 1 or 2)" ;;
+        2) VARIANT="cli" ;;
+        *) die "invalid choice '$choice' (use 1 or 2)" ;;
     esac
 else
     echo "No interactive terminal detected; defaulting to alloysh (TUI)." >&2
@@ -68,15 +60,9 @@ else
 fi
 
 case "$VARIANT" in
-    tui)
-        BINARY="alloysh${EXE}"
-        ;;
-    cli)
-        BINARY="alloyctl${EXE}"
-        ;;
-    *)
-        die "unknown variant '$VARIANT' (use tui or cli)"
-        ;;
+    tui) BINARY="alloysh${EXE}" ;;
+    cli) BINARY="alloyctl${EXE}" ;;
+    *) die "unknown variant '$VARIANT' (use tui or cli)" ;;
 esac
 
 PLATFORM="$(detect_platform)"
@@ -107,7 +93,7 @@ echo
 TMP="$TARGET.tmp.$$"
 rm -f "$TMP"
 
-if curl \
+if ! curl \
     --fail \
     --location \
     --show-error \
@@ -116,11 +102,8 @@ if curl \
     --output "$TMP" \
     "$BASE/$ARTIFACT"
 then
-    :
-else
     rc=$?
     rm -f "$TMP"
-
     echo
     echo "error: download failed (curl exit $rc)" >&2
 
@@ -182,12 +165,8 @@ case ":$PATH:" in
         ;;
     *)
         case "${SHELL:-}" in
-            *fish)
-                rc="$HOME/.config/fish/config.fish"
-                ;;
-            *zsh)
-                rc="$HOME/.zshrc"
-                ;;
+            *fish) rc="$HOME/.config/fish/config.fish" ;;
+            *zsh) rc="$HOME/.zshrc" ;;
             *bash)
                 if [[ "$(uname -s)" == "Darwin" ]]; then
                     rc="$HOME/.bash_profile"
@@ -195,9 +174,7 @@ case ":$PATH:" in
                     rc="$HOME/.bashrc"
                 fi
                 ;;
-            *)
-                rc="$HOME/.profile"
-                ;;
+            *) rc="$HOME/.profile" ;;
         esac
 
         mkdir -p "$(dirname "$rc")"
@@ -218,7 +195,6 @@ esac
 if [[ "$(uname -s)" == "Linux" && "$VARIANT" == "tui" ]]; then
     DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
     ICON_BASE="https://raw.githubusercontent.com/$REPO/HEAD/assets"
-
     icon_ok=true
 
     for size in 128 256 512; do
