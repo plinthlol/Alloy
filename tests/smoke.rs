@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // verifies the lib/main split worked: integration tests can see crate items
 // through the public API.
 

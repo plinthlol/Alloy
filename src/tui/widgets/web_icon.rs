@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // thumbnail cache for content browsed *from the web* (Modrinth/CurseForge
 // search results in the wizard and browse popups). mirrors content/list.rs's
 // local-icon pattern — bounded concurrency, decode off the render thread,

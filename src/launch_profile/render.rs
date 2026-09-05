@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // renders a parsed profile into argv-style lists for the JVM and the game:
 // resolves conditional args, filters them through the rule evaluator,
 // substitutes template variables. legacy `minecraftArguments` strings are

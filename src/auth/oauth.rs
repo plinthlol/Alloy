@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // microsoft oauth device-code flow: MSA device code -> token -> xbox/mc
 // exchange -> profile fetch. device code needs no redirect URI, which
 // suits a TUI.

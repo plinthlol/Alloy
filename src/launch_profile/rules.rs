@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // mojang rule evaluation. profiles, libraries, and arguments can carry
 // conditional rules that filter by OS, architecture, or feature flags.
 // this module is the single source of truth for that semantics.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // modpack install from either catalog:
 // - Modrinth: the pack's self-contained .mrpack (modrinth.index.json +
 //   per-file download URLs); its manifest gives game version/loader.

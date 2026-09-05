@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // rendering for the content browse popup. same two-step shape as the
 // modpack browser — the actual search/version step rendering lives in the
 // shared browse_step module now (was duplicated here before), so this file

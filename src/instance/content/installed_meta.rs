@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // tracks which catalog project (Modrinth/CurseForge, see ModpackHit::source_key)
 // is responsible for which installed filename in an instance. mod/resourcepack
 // filenames aren't stable across versions (e.g. sodium-fabric-0.5.jar ->

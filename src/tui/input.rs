@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // keybindings and input dispatch.
 // the general pattern: check which area is focused, give it first crack at the
 // keypress, and fall through to global bindings if nobody claimed it.

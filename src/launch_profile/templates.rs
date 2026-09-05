@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // fills `${variable_name}` placeholders in mojang launch args from the
 // active session (paths, account info, classpath, natives dir, ...). the
 // full variable set is in `TemplateContext`. unknown placeholders are left

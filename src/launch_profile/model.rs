@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // mojang-format launch profile types, mirroring the JSON schema used by
 // vanilla and all loader installers. unknown fields are silently dropped
 // (serde default), which is fine — we write upstream JSON byte-for-byte on

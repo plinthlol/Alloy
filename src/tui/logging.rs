@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // sets up the tracing stack: file logging, the tui-logger widget, and a
 // custom StatusLayer that feeds WARN/ERROR events into the toast system.
 // also keeps an in-memory ring buffer of log lines for the overlay viewer.

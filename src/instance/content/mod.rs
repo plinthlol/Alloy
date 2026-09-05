@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // scanning and toggling instance content (mods, resource packs, worlds).
 // minecraft's ".disabled" suffix convention does most of the heavy lifting.
 

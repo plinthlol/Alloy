@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // "pick a java runtime" popup, opened from the instance Settings tab's Java
 // row. lists every runtime discover_java_installations() found (PATH,
 // JAVA_HOME, and well-known per-OS install dirs, deduplicated by resolved

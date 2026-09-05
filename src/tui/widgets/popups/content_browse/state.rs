@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // state machine for the "browse & install" popup reachable from the Mods
 // and Resource Packs content tabs. deliberately mirrors the modpack
 // browser in new_instance/state.rs (same two-step Browse → Version shape,

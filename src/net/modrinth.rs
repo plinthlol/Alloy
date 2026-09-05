@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // modrinth API v2 client: search, list versions, download files. keyless,
 // unlike curseforge. like fabric.rs/quilt.rs, every public fn has a
 // `_from(base)` variant so tests can point at a wiremock server.

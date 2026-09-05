@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // in-memory ring buffer for live logs of running instances, capped at
 // 2000 lines each so a week-long server session doesn't eat all the RAM.
 

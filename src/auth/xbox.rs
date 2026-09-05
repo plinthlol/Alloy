@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // hand-rolled minecraft-msa-auth replacement: walks a microsoft access
 // token through xbox live -> xsts -> minecraft services (the standard
 // third-party-launcher chain; see

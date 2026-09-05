@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // unit tests for the markdown document pipeline in tui/widgets/markdown.rs.
 // kept here (via #[path]) rather than inline so the 1800-line widget stays
 // focused on rendering; this module is a child of `markdown`, so private

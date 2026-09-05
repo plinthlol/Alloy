@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // per-instance settings tab: java selection, jvm args, memory bounds, and a
 // linux-only system-glfw override. sits in the content tab bar (h/l cycles
 // to it like the others).

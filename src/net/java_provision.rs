@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // downloads a Temurin (Eclipse Adoptium) Java runtime when no compatible
 // java is installed. instance::manager::create_inner decides *when* to call
 // this; the actual fetching lives here in net/ because it's just HTTP.

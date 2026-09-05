@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // account persistence, active-account switching, and offline uuids.
 
 use std::path::PathBuf;

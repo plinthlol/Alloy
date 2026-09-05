@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // loads config.toml from the platform config dir, creating defaults if
 // missing. everything lands in SETTINGS so the rest of the app can grab it.
 //

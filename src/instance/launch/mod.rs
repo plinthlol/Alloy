@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // builds the java command and spawns minecraft: classpath, auth injection,
 // log capture. loader-specific patches live in submodules (e.g. lwjgl3ify).
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // CurseForge Core API (v1) client. unlike modrinth, every request needs an
 // `x-api-key` header — no anonymous tier. the key comes from
 // config::SETTINGS.curseforge.effective_api_key(); each fn also fails with

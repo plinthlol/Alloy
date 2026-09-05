@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // project description popup, ported from rmcl's discovery project page:
 // fetches the long-form description (Modrinth markdown `body`, CurseForge
 // HTML description — the markdown renderer's normalize_html converts it)

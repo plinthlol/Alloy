@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // global settings popup: paths, memory defaults, and UI timing knobs from
 // config.toml, opened with 's' from the sidebar. distinct from the
 // per-instance Settings tab (content/settings.rs), which edits one

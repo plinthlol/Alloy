@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // shared render logic for the two-step (search → version) "browse" UI.
 // three flows use this exact shape — modpacks (new_instance wizard) and
 // mods/resourcepacks (content_browse popup) — and used to each carry their

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // system-detection helpers shared by launch and install paths. mojang names
 // things differently from std::env::consts (macOS is "osx" in profile
 // rules), so this is the single source of truth for translating.

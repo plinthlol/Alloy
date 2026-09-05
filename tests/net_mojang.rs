@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // integration tests for the public mojang fetchers. wiremock stands in for
 // Mojang so tests are fast, deterministic, and don't depend on the live
 // endpoint. these are different from the #[ignore = "hits live Mojang API"]

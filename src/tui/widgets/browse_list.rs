@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // shared row styling for popup "browse" lists (search results, version
 // pickers). ratatui's default `List` selection just swaps the foreground
 // color, which barely registers on dim themes — the selected row vanishes

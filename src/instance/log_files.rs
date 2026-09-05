@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // reads Minecraft's own log directory instead of keeping a launcher-owned
 // copy: `latest.log` is always the current session, and log4j rotates and
 // gzips everything older into `<yyyy-MM-dd>-<n>.log.gz` on its own. we

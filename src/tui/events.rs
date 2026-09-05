@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // typed channel for background-task/popup → TUI notifications. replaces the
 // ad-hoc global result queues event.rs used to drain by hand
 // (PENDING_INSTANCES, *_RESULT, PENDING_LAST_PLAYED) with one seam:

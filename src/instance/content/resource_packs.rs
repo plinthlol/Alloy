@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // resource pack scanning. packs can be either .zip files or plain directories,
 // and metadata lives in pack.mcmeta (which mojang decided should have like 3
 // different ways to encode a description, because why not)

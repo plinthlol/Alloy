@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Constantin Bauer
+// SPDX-License-Identifier: GPL-3.0-only
+
 // resolves a profile's `inheritsFrom` chain (loaders layer their additions
 // on a vanilla base) into one flat profile.
 //
