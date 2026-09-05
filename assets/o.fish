@@ -1,32 +1,9 @@
 #!/usr/bin/env fish
-# add-offline-account.fish
-#
-# Adds an offline account "Plinth" to alloy's accounts.json.
-#
-# The JSON written here matches what alloy's AccountStore::load() expects:
-#   {"uuid", "username", "account_type": "Offline", "active"}
-# (refresh_token / cached_mc_token are skipped when absent, so we omit them.)
-#
-# The uuid is deterministic: MD5("OfflinePlayer:Plinth") with the version-3 /
-# variant bits patched in, same as src/auth/accounts.rs::offline_uuid. This is
-# pinned to b28ff477-71b4-3ec0-85b3-d13853c7681f so save data, whitelists, and
-# other launchers see the same identity.
-#
-# Merge semantics mirror AccountStore::add():
-#   - an existing account with the same uuid is replaced
-#   - the new account becomes active only when it's the only one in the list
-#
-# Note: alloy normally requires the FIRST account to be a Microsoft account
-# (prove ownership once). This script writes the file directly, bypassing that
-# gate — fine for launching, but if you intend to add Microsoft accounts later,
-# consider adding one first via the TUI (a -> m).
 
-set -l name "Plinth"
-set -l uuid "b28ff477-71b4-3ec0-85b3-d13853c7681f"
 
-# config dir: $XDG_CONFIG_HOME/alloy, falling back to ~/.config/alloy.
-# mirrors src/config/mod.rs::get_config_path via dirs::config_dir().
-# NOTE: set -l inside if/else blocks is scoped to the block, so declare
+set -l name "Alloy"
+set -l uuid "e1438414-64d6-4592-9769-d073419a8d1e"
+scoped to the block, so declare
 # config_dir up here and assign inside.
 set -l config_dir
 if set -q XDG_CONFIG_HOME
