@@ -450,6 +450,10 @@ pub fn handle_key(key_event: &KeyEvent, state: &mut LogsState) -> bool {
                 state.viewer_focused = false;
                 true
             }
+            // while reading a log, plain h/l/Left/Right mean nothing here --
+            // swallow them so they don't bubble up to the global content
+            // handler and yank the user to a different tab mid-read.
+            KeyCode::Char('h') | KeyCode::Char('l') | KeyCode::Left | KeyCode::Right => true,
             _ => false,
         }
     } else {
@@ -690,8 +694,8 @@ fn render_viewer(
         .filter(|l| state.viewer_search.matches(&l.text))
         .collect();
 
-    // one status row above the log content for the follow indicator +
-    // line-position stat; the rest is the actual log text.
+    // one status row above the log content for the line-position stat; the
+    // rest is the actual log text.
     let [status_area, body_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
@@ -715,15 +719,7 @@ fn render_viewer(
             ScrollbarState::new(state.viewer_max_scroll).position(state.viewer_scroll);
     }
 
-    render_viewer_status(
-        frame,
-        status_area,
-        state,
-        is_live,
-        following,
-        &lines,
-        visible_height,
-    );
+    render_viewer_status(frame, status_area, state, is_live, &lines, visible_height);
 
     if lines.is_empty() {
         return;
@@ -775,33 +771,17 @@ fn render_viewer(
     );
 }
 
-// left: "⏺ following" while tailing a live session. right: current
-// line-position ("120-160 / 482") and, for a compressed archive, its
-// decompressed size.
+// right-aligned line-position stat ("120-160 / 482") and, for a
+// compressed archive, its decompressed size.
 fn render_viewer_status(
     frame: &mut Frame,
     area: Rect,
     state: &LogsState,
     is_live: bool,
-    following: bool,
     lines: &[&ViewerLine],
     visible_height: usize,
 ) {
     let theme = THEME.as_ref();
-    let [left_area, right_area] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-
-    if following {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "\u{23fa} following",
-                Style::default()
-                    .fg(theme.success())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            left_area,
-        );
-    }
 
     let total = lines.len();
     let (start, end) = if total == 0 {
@@ -830,7 +810,7 @@ fn render_viewer_status(
     frame.render_widget(
         Paragraph::new(Span::styled(stat_text, Style::default().fg(theme.text_dim())))
             .alignment(Alignment::Right),
-        right_area,
+        area,
     );
 }
 
