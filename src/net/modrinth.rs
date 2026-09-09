@@ -258,6 +258,31 @@ pub struct ProjectBody {
     // (auth'd uploads) — reads come embedded here.
     #[serde(default)]
     pub gallery: Vec<GalleryImage>,
+    // fields from the Modrinth API that we don't use but need to deserialize
+    #[serde(default)]
+    pub client_side: Option<String>,
+    #[serde(default)]
+    pub server_side: Option<String>,
+    #[serde(default)]
+    pub game_versions: Vec<String>,
+    #[serde(default)]
+    pub downloads: Option<u64>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub project_type: Option<String>,
+    #[serde(default)]
+    pub licenses: Vec<String>,
+    #[serde(default)]
+    pub published: Option<String>,
+    #[serde(default)]
+    pub updated: Option<String>,
+    #[serde(default)]
+    pub featured_versions: Vec<String>,
+    #[serde(default)]
+    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
