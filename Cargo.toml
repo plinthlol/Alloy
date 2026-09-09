@@ -93,4 +93,5 @@ lto = "thin"
 tempfile = "3"
 wiremock = "0.6"
 rstest = "0.23"
+tokio = { version = "1.0.0", features = ["test-util"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }

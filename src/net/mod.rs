@@ -17,10 +17,24 @@ use java_provision::ImageType;
 
 use reqwest::Client;
 use serde::de::DeserializeOwned;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
+
+// hosts whose API endpoints get client-side rate limiting. CDN/download
+// hosts (cdn.modrinth.com, mediafilez.forgecdn.org, ...) are deliberately
+// excluded — bulk modpack downloads would crawl at 2/s otherwise, and
+// those endpoints don't count against the API rate limits.
+const MODRINTH_API_HOST: &str = "api.modrinth.com";
+const CURSEFORGE_API_HOST: &str = "api.curseforge.com";
+
+// max API requests per host within one sliding window, and the window.
+// a caller that would exceed the budget parks (async) until the oldest
+// request slides out of the window — requests queue rather than fail.
+const RATE_LIMIT_MAX_PER_WINDOW: usize = 2;
+const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum NetError {
@@ -31,7 +45,14 @@ pub enum NetError {
     #[error("Parse error: {0}")]
     Parse(String),
     #[error("Server returned error status {status}: {url}")]
-    StatusError { status: u16, url: String },
+    StatusError {
+        status: u16,
+        url: String,
+        // server-provided Retry-After, when the response carried one (only
+        // the numeric delay-seconds form; HTTP-dates degrade to None and
+        // the retry envelope falls back to exponential backoff)
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("invalid JSON from {url} (status {status}, body: {snippet})")]
     BadJson {
         url: String,
@@ -45,6 +66,10 @@ pub enum NetError {
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client,
+    // per-host rate limiters, created lazily on first gated request.
+    // std Mutex is fine here: it's only held to clone an Arc, never
+    // across an await.
+    limiters: Arc<Mutex<HashMap<&'static str, Arc<RateLimiter>>>>,
 }
 
 impl Default for HttpClient {
@@ -80,7 +105,10 @@ impl HttpClient {
                 Client::new()
             });
         tracing::trace!("Created HTTP client with user-agent '{}'", user_agent);
-        Self { inner: client }
+        Self {
+            inner: client,
+            limiters: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     // process-wide shared client for the hot UI paths (catalog searches,
@@ -96,9 +124,12 @@ impl HttpClient {
     }
 
     pub async fn get(&self, url: &str) -> Result<reqwest::Response, NetError> {
+        self.gate(url).await;
+        self.gate(url).await;
         tracing::trace!("HTTP GET {}", url);
         let response = self.inner.get(url).send().await?;
         if !response.status().is_success() {
+            let retry_after = parse_retry_after(&response);
             tracing::debug!(
                 "HTTP GET {} returned non-success status {}",
                 url,
@@ -107,6 +138,7 @@ impl HttpClient {
             return Err(NetError::StatusError {
                 status: response.status().as_u16(),
                 url: url.to_string(),
+                retry_after,
             });
         }
         tracing::trace!("HTTP GET {} succeeded with {}", url, response.status());
@@ -120,6 +152,7 @@ impl HttpClient {
         url: &str,
         headers: &[(&str, &str)],
     ) -> Result<reqwest::Response, NetError> {
+        self.gate(url).await;
         tracing::trace!("HTTP GET {} ({} extra header(s))", url, headers.len());
         let mut req = self.inner.get(url);
         for (name, value) in headers {
@@ -127,6 +160,7 @@ impl HttpClient {
         }
         let response = req.send().await?;
         if !response.status().is_success() {
+            let retry_after = parse_retry_after(&response);
             tracing::debug!(
                 "HTTP GET {} returned non-success status {}",
                 url,
@@ -135,6 +169,7 @@ impl HttpClient {
             return Err(NetError::StatusError {
                 status: response.status().as_u16(),
                 url: url.to_string(),
+                retry_after,
             });
         }
         tracing::trace!("HTTP GET {} succeeded with {}", url, response.status());
@@ -217,6 +252,97 @@ impl HttpClient {
     }
 }
 
+// Retry-After is either delay-seconds or an HTTP-date; only the numeric
+// form translates into a useful delay here, so date values degrade to
+// None and the retry envelope falls back to exponential backoff.
+fn parse_retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
+    let value = response.headers().get(reqwest::header::RETRY_AFTER)?;
+    let secs: u64 = value.to_str().ok()?.trim().parse().ok()?;
+    Some(std::time::Duration::from_secs(secs))
+}
+
+// maps a url to its rate-limited host, or None if the host isn't one of
+// the throttled API endpoints (everything else — CDNs, Mojang, loaders —
+// goes through ungated).
+fn rate_limited_host(url: &str) -> Option<&'static str> {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    // drop userinfo (user@host) if present, then the path/query
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // strip a trailing :port so host:port spellings still match the bare
+    // host constants
+    let host = authority.split_once(':').map_or(authority, |(h, _)| h);
+    match host {
+        MODRINTH_API_HOST => Some(MODRINTH_API_HOST),
+        CURSEFORGE_API_HOST => Some(CURSEFORGE_API_HOST),
+        _ => None,
+    }
+}
+
+impl HttpClient {
+    // waits for a rate-limit slot for `url`'s host before the request
+    // goes out. no-op for hosts not in the throttle list. retry attempts
+    // (which re-enter get/get_with_headers) each acquire their own slot,
+    // so a retry storm can't bypass the budget either.
+    async fn gate(&self, url: &str) {
+        let Some(host) = rate_limited_host(url) else {
+            return;
+        };
+        let limiter = {
+            let mut map = self.limiters.lock().expect("rate limiter map poisoned");
+            Arc::clone(map.entry(host).or_insert_with(|| Arc::new(RateLimiter::new())))
+        };
+        limiter.acquire().await;
+    }
+}
+
+// sliding-window rate limiter: keeps the timestamps of the last window's
+// requests; when the window is full, `acquire` sleeps until the oldest
+// timestamp ages out and retries. FIFO by lock ordering, so queued
+// callers are admitted in roughly the order they arrived.
+struct RateLimiter {
+    recent: tokio::sync::Mutex<VecDeque<tokio::time::Instant>>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            recent: tokio::sync::Mutex::new(VecDeque::new()),
+        }
+    }
+
+    // reserves one request slot, blocking until the window has room.
+    // must be awaited before actually sending the request.
+    async fn acquire(&self) {
+        loop {
+            let now = tokio::time::Instant::now();
+            let wait_until = {
+                let mut recent = self.recent.lock().await;
+                // drop timestamps that have slid out of the window
+                while let Some(&front) = recent.front() {
+                    if now.duration_since(front) >= RATE_LIMIT_WINDOW {
+                        recent.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                if recent.len() < RATE_LIMIT_MAX_PER_WINDOW {
+                    recent.push_back(now);
+                    None
+                } else {
+                    // window is full: the earliest slot frees up one window
+                    // after it was taken
+                    Some(recent.front().copied().expect("non-empty above") + RATE_LIMIT_WINDOW)
+                }
+            };
+            match wait_until {
+                None => return,
+                Some(at) => tokio::time::sleep_until(at).await,
+            }
+        }
+    }
+}
+
 // shared retry envelope: retries transient failures (timeouts, connect
 // errors, 5xx) with exponential backoff. used by get_json and get_bytes.
 async fn get_with_retry<T, F, Fut>(client: &HttpClient, url: &str, decode: F) -> Result<T, NetError>
@@ -250,6 +376,8 @@ where
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 500;
+// upper bound on a server-suggested Retry-After we'll actually wait
+const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 // same envelope, but with extra headers (CurseForge's `x-api-key`).
 // separate fn so the plain path doesn't take `&[]` at every call site.
@@ -320,17 +448,30 @@ async fn decode_json_response<T: DeserializeOwned>(
 }
 
 async fn sleep_before_retry(kind: &str, url: &str, attempt: u32, err: &NetError) {
-    let delay = RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+    // honor the server's Retry-After when it sent one, capped so a hostile
+    // header can't stall an install for minutes; otherwise exponential backoff
+    let server_delay = if let NetError::StatusError {
+        retry_after: Some(d),
+        ..
+    } = err
+    {
+        Some((*d).min(RETRY_AFTER_CAP))
+    } else {
+        None
+    };
+    let delay =
+        server_delay.unwrap_or_else(|| std::time::Duration::from_millis(RETRY_BASE_DELAY_MS * 2u64.pow(attempt)));
     tracing::warn!(
-        "{} failed, retrying after {}ms (attempt {}/{}): {}: {}",
+        "{} failed, retrying after {}ms ({}, attempt {}/{}): {}: {}",
         kind,
-        delay,
+        delay.as_millis(),
+        if server_delay.is_some() { "Retry-After" } else { "backoff" },
         attempt + 2,
         MAX_RETRIES + 1,
         url,
         err
     );
-    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    tokio::time::sleep(delay).await;
 }
 
 // streams a file to disk, calling progress_cb(downloaded, total). total is
@@ -475,10 +616,13 @@ async fn write_stream_to_file(
 
 // timeouts/connect/body errors and 5xx are worth retrying; a 404 or a
 // parse error isn't (the body already arrived, so retrying won't help).
+// 429 (rate limited) retries too: the client-side limiter only budgets
+// this process, so a shared IP (other launchers, VPN exit nodes) can
+// still trip the server-side limit — back off and try again.
 fn is_retryable(err: &NetError) -> bool {
     match err {
         NetError::Http(e) => e.is_timeout() || e.is_body() || e.is_connect(),
-        NetError::StatusError { status, .. } => *status >= 500,
+        NetError::StatusError { status, .. } => *status >= 500 || *status == 429,
         NetError::BadJson { .. } => true,
         _ => false,
     }
@@ -969,5 +1113,63 @@ mod tests {
     #[test]
     fn maven_empty_string() {
         assert_eq!(maven_coord_to_path(""), None);
+    }
+
+    #[test]
+    fn rate_limited_hosts_match_api_endpoints_only() {
+        assert_eq!(
+            rate_limited_host("https://api.modrinth.com/v2/search?query=x"),
+            Some(MODRINTH_API_HOST)
+        );
+        assert_eq!(
+            rate_limited_host("https://api.curseforge.com/v1/mods/search"),
+            Some(CURSEFORGE_API_HOST)
+        );
+        // CDNs and everything else stay ungated
+        assert_eq!(
+            rate_limited_host("https://cdn.modrinth.com/data/xyz/versions/1.0/mod.jar"),
+            None
+        );
+        assert_eq!(
+            rate_limited_host("https://mediafilez.forgecdn.org/files/1/2/file.jar"),
+            None
+        );
+        assert_eq!(rate_limited_host("https://piston-meta.mojang.com/mc/game.json"), None);
+        // ports and userinfo are stripped before matching
+        assert_eq!(rate_limited_host("https://api.modrinth.com:443/v2/search"), Some(MODRINTH_API_HOST));
+        assert_eq!(rate_limited_host("https://user@api.curseforge.com/v1/mods"), Some(CURSEFORGE_API_HOST));
+        // a host that merely *ends with* the API host must not match
+        assert_eq!(rate_limited_host("https://api.modrinth.com.evil.com/v2/search"), None);
+        assert_eq!(rate_limited_host("not a url"), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limiter_queues_requests_past_two_per_second() {
+        let limiter = RateLimiter::new();
+        let start = tokio::time::Instant::now();
+        for _ in 0..5 {
+            limiter.acquire().await;
+        }
+        // 2 immediate, 3rd+4th admitted at +1s, 5th at +2s. paused tokio
+        // clock makes this deterministic and instant in wall time.
+        assert!(
+            start.elapsed() >= std::time::Duration::from_secs(2),
+            "expected the 5-request burst to be queued, took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "expected no over-throttling beyond the sliding window, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rate_limiter_admits_bursts_up_to_the_cap_immediately() {
+        let limiter = RateLimiter::new();
+        let start = tokio::time::Instant::now();
+        limiter.acquire().await;
+        limiter.acquire().await;
+        assert_eq!(start.elapsed(), std::time::Duration::ZERO);
     }
 }

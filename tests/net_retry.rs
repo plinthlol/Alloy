@@ -3,15 +3,17 @@
 
 // integration tests for the retry envelope in src/net/mod.rs. wiremock
 // stands in for live upstream APIs so we can assert that 5xx responses
-// retry, 4xx responses fail fast, and the cap (MAX_RETRIES = 3, total
-// 4 attempts) is honoured. these tests exercise public HttpClient methods,
-// not the private retry helper directly.
+// retry, 4xx responses fail fast (except 429, which retries and honors
+// Retry-After), and the cap (MAX_RETRIES = 3, total 4 attempts) is
+// honoured. these tests exercise public HttpClient methods, not the
+// private retry helper directly.
 //
 // note: get_with_retry sleeps between attempts (500ms, 1000ms, 2000ms),
 // so the gives-up-after-max-retries test takes about 3.5s of wall time.
 // nothing to be done about that without making the delays configurable.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use serde::Deserialize;
 use serde_json::json;
@@ -97,6 +99,103 @@ async fn get_json_gives_up_after_max_retries() {
         format!("{err:?}").contains("503"),
         "expected 503 in final error, got: {err:?}"
     );
+}
+
+// ---------- 429 / Retry-After ----------
+
+#[tokio::test]
+async fn get_json_retries_429_then_succeeds() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(429))
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/api", server.uri());
+    let result: ApiResponse = HttpClient::new().get_json(&url).await.unwrap();
+    assert!(result.ok);
+}
+
+#[tokio::test]
+async fn retry_after_header_sets_the_wait() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "1"),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/api", server.uri());
+    let start = Instant::now();
+    let result: ApiResponse = HttpClient::new().get_json(&url).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(result.ok);
+    // the wait must come from Retry-After (1s), not the 500ms backoff
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1000),
+        "expected the Retry-After wait (~1s), took {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(3000),
+        "expected no extra delay beyond Retry-After, took {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn http_date_retry_after_falls_back_to_backoff() {
+    let server = MockServer::start().await;
+
+    // HTTP-date form isn't translated into a delay (only delay-seconds is);
+    // the envelope should still retry, using the normal exponential backoff
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT"),
+        )
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = format!("{}/api", server.uri());
+    let start = Instant::now();
+    let result: ApiResponse = HttpClient::new().get_json(&url).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(result.ok);
+    // backoff for attempt 0 is 500ms — well under the 1s a naive date
+    // parse could produce
+    assert!(elapsed < std::time::Duration::from_millis(1000));
 }
 
 // ---------- download_file ----------
