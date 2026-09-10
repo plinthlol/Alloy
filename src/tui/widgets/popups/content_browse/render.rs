@@ -115,6 +115,8 @@ fn clone_state(state: &ContentBrowseState) -> ContentBrowseState {
         query_focused: state.query_focused,
         search_generation: state.search_generation,
         last_searched_query: state.last_searched_query.clone(),
+        // render-only snapshot: never owns a live task, so no handle to carry
+        search_task: None,
         results: state.results.clone(),
         idx: state.idx,
         versions: state.versions.clone(),

@@ -103,6 +103,14 @@ pub struct ContentBrowseState {
     // (e.g. Enter right after the debounce already fired).
     pub search_generation: u64,
     pub last_searched_query: String,
+    // abort handle of the currently running search task. each new search
+    // (debounce fire, Enter, source switch) aborts the previous one, so a
+    // stale request can't sit queued in the net layer's rate limiter —
+    // aborted while waiting there it never consumes a slot, it just
+    // vanishes. aborted tasks can't hold the state mutex: the lock is
+    // only taken synchronously around result application, never across
+    // an await.
+    pub search_task: Option<tokio::task::AbortHandle>,
     pub results: LoadState<Vec<ModpackHit>>,
     pub idx: usize,
     pub versions: LoadState<Vec<ModpackVersionHit>>,
@@ -135,6 +143,7 @@ impl Default for ContentBrowseState {
             query_focused: true,
             search_generation: 0,
             last_searched_query: String::new(),
+            search_task: None,
             results: LoadState::Idle,
             idx: 0,
             versions: LoadState::Idle,
@@ -500,18 +509,33 @@ fn handle_version_key(state: &mut ContentBrowseState, key_event: &KeyEvent) {
 }
 
 // how long to wait after the last keystroke before firing a search, so
-// typing a name fans out one API call instead of one per character.
-const SEARCH_DEBOUNCE_MS: u64 = 200;
+// typing a name fans out one API call instead of one per character. 500ms
+// because fast typists regularly exceed 200ms between letters — every gap
+// longer than the debounce is one wasted request, and each one queues
+// behind the 2/s rate limiter, delaying the results that actually matter.
+const SEARCH_DEBOUNCE_MS: u64 = 500;
+
+// cancels the in-flight (or limiter-queued) search task, if any, so a
+// superseded request never reaches the wire.
+fn abort_search_task(state: &mut ContentBrowseState) {
+    if let Some(handle) = state.search_task.take() {
+        handle.abort();
+    }
+}
 
 // schedules a debounced search: bumps the generation counter (invalidating
 // any earlier pending debounce) and spawns a task that fires only if it
 // still holds the latest generation when it wakes. typing 6 letters
-// collapses into one request, 300ms after the last one.
+// collapses into one request, 500ms after the last one.
 fn schedule_search(state: &mut ContentBrowseState) {
     state.search_generation += 1;
+    // kill any request that's already in flight or queued — typing a
+    // letter supersedes it, so letting it run would waste a rate-limiter
+    // slot and delay the search the user actually wants
+    abort_search_task(state);
     let generation = state.search_generation;
     let state_arc = BROWSE_STATE.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS)).await;
         if let Ok(mut s) = state_arc.lock() {
             if s.search_generation == generation {
@@ -519,6 +543,7 @@ fn schedule_search(state: &mut ContentBrowseState) {
             }
         }
     });
+    state.search_task = Some(handle.abort_handle());
 }
 
 fn ensure_search(state: &mut ContentBrowseState) {
@@ -542,8 +567,11 @@ fn ensure_search(state: &mut ContentBrowseState) {
     let search_game_version = (kind == ContentKind::Mod).then(|| game_version.clone());
     state.results = LoadState::Loading;
     state.idx = 0;
+    // supersede any still-running search (direct-call paths: Enter and
+    // source switches — the debounce path aborts in schedule_search)
+    abort_search_task(state);
     let state_arc = BROWSE_STATE.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let client = crate::net::HttpClient::shared();
         let outcome: Result<Vec<ModpackHit>, String> = match source {
             ModpackSource::Modrinth => crate::net::modrinth::search(
@@ -603,6 +631,7 @@ fn ensure_search(state: &mut ContentBrowseState) {
         }
         crate::tui::request_redraw();
     });
+    state.search_task = Some(handle.abort_handle());
 }
 
 fn filter_incompatible_mods(kind: ContentKind, game_version: &str, hits: Vec<ModpackHit>) -> Vec<ModpackHit> {
