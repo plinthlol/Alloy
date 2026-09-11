@@ -250,9 +250,9 @@ pub async fn get_version(client: &HttpClient, version_id: &str) -> Result<Projec
 pub struct ProjectBody {
     pub slug: String,
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub description: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub body: String,
     // project screenshots. the standalone /gallery routes are write-only
     // (auth'd uploads) — reads come embedded here.
@@ -291,14 +291,28 @@ pub struct GalleryImage {
     // full-resolution counterpart to `url` (a ~350px webp thumbnail)
     #[serde(default)]
     pub raw_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub description: String,
     #[serde(default)]
     pub featured: bool,
     #[serde(default)]
     pub ordering: i64,
+}
+
+// serde's `#[serde(default)]` only kicks in when a field is *absent* — an
+// explicit `"field": null` still fails to deserialize into String. Modrinth
+// sends nulls in practice (e.g. gallery[0].description on some projects),
+// which killed the whole /v2/project fetch for those projects, so treat
+// null as "use the default" here.
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    let value: Option<T> = Option::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 pub async fn get_project(
@@ -370,6 +384,40 @@ mod tests {
     #[test]
     fn urlencode_leaves_safe_chars_alone() {
         assert_eq!(urlencode("fabric-1.20.1"), "fabric-1.20.1");
+    }
+
+    // regression: Modrinth sends "description": null in gallery items on
+    // some projects (e.g. sKO5olCV). serde's `#[serde(default)]` only
+    // covers *absent* fields, so an explicit null used to kill the whole
+    // /v2/project parse — and BadJson used to retry it 4x for good measure.
+    #[test]
+    fn project_body_tolerates_explicit_nulls() {
+        let json = serde_json::json!({
+            "slug": "example",
+            "title": "Example",
+            "gallery": [{
+                "url": "https://cdn.modrinth.com/img.png",
+                "title": "Logo",
+                "description": null,
+                "featured": false,
+                "ordering": 0
+            }]
+        });
+        let parsed: ProjectBody = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.slug, "example");
+        assert_eq!(parsed.gallery[0].title, "Logo");
+        assert_eq!(parsed.gallery[0].description, "");
+
+        // and a fully-null text field lands on the default too
+        let json: serde_json::Value = serde_json::json!({
+            "slug": "example",
+            "title": "Example",
+            "description": null,
+            "body": null
+        });
+        let parsed: ProjectBody = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.description, "");
+        assert_eq!(parsed.body, "");
     }
 
     #[test]

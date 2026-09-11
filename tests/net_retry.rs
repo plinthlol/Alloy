@@ -264,45 +264,18 @@ async fn download_file_fails_fast_on_4xx() {
 }
 
 #[tokio::test]
-async fn get_json_retries_non_json_body_then_succeeds() {
+async fn get_json_bad_json_fails_fast_and_names_the_serde_error() {
     let server = MockServer::start().await;
 
-    Mock::given(method("GET"))
-        .and(path("/api"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(
-                    b"<html><body>upstream hiccup</body></html>".to_vec(),
-                    "text/html; charset=utf-8",
-                ),
-        )
-        .up_to_n_times(1)
-        .expect(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let url = format!("{}/api", server.uri());
-    let result: ApiResponse = HttpClient::new().get_json(&url).await.unwrap();
-    assert!(result.ok);
-}
-
-#[tokio::test]
-async fn get_json_bad_json_error_is_descriptive() {
-    let server = MockServer::start().await;
-
+    // BadJson is a deterministic parse failure — it must NOT retry, so
+    // expect(1) panics if the envelope sends a second request.
     Mock::given(method("GET"))
         .and(path("/api"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_raw(b"<html>boom</html>".to_vec(), "text/html"),
         )
-        .expect(4)
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -323,4 +296,9 @@ async fn get_json_bad_json_error_is_descriptive() {
     assert_eq!(status, 200);
     assert!(snippet.contains("text/html"));
     assert!(snippet.contains("<html>boom</html>"));
+    // the serde error itself must be in the snippet, not just the body
+    assert!(
+        snippet.contains("expected value"),
+        "snippet should name the serde error, got: {snippet}"
+    );
 }

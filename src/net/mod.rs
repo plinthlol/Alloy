@@ -431,18 +431,22 @@ async fn decode_json_response<T: DeserializeOwned>(
         let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
             .escape_debug()
             .collect::<String>();
+        // include the serde error itself — a bare body snippet doesn't tell
+        // you *why* the parse failed (missing field vs null-into-String vs
+        // truncated), and without it 200-with-garbage is undebuggable
         tracing::debug!(
-            "JSON decode failed for {} (status {}, content-type {}, {} bytes): {}",
+            "JSON decode failed for {} (status {}, content-type {}, {} bytes): {} — {}",
             url,
             status,
             content_type,
             bytes.len(),
-            error
+            error,
+            head
         );
         NetError::BadJson {
             url,
             status,
-            snippet: format!("{content_type}: {head}"),
+            snippet: format!("{content_type}: {head} — {error}"),
         }
     })
 }
@@ -623,7 +627,10 @@ fn is_retryable(err: &NetError) -> bool {
     match err {
         NetError::Http(e) => e.is_timeout() || e.is_body() || e.is_connect(),
         NetError::StatusError { status, .. } => *status >= 500 || *status == 429,
-        NetError::BadJson { .. } => true,
+        // a parse failure is deterministic: the same body will fail the
+        // same way every time, so retrying just stalls the caller for
+        // seconds before surfacing the identical error
+        NetError::BadJson { .. } => false,
         _ => false,
     }
 }
@@ -1108,6 +1115,16 @@ mod tests {
     #[test]
     fn maven_invalid_single_part() {
         assert_eq!(maven_coord_to_path("just-a-string"), None);
+    }
+
+    #[test]
+    fn bad_json_is_not_retryable_and_named_serde_error_survives() {
+        let err = is_retryable(&NetError::BadJson {
+            url: "https://api.modrinth.com/v2/project/x".into(),
+            status: 200,
+            snippet: "application/json: {...} — invalid type: null, expected a string".into(),
+        });
+        assert!(!err, "parse failures are deterministic and must not retry");
     }
 
     #[test]
