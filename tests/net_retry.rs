@@ -8,7 +8,7 @@
 // honoured. these tests exercise public HttpClient methods, not the
 // private retry helper directly.
 //
-// note: get_with_retry sleeps between attempts (500ms, 1000ms, 2000ms),
+// note: get_with_retry sleeps between attempts (667ms, 1334ms, 2668ms),
 // so the gives-up-after-max-retries test takes about 3.5s of wall time.
 // nothing to be done about that without making the delays configurable.
 

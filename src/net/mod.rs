@@ -375,7 +375,7 @@ where
 }
 
 const MAX_RETRIES: u32 = 3;
-const RETRY_BASE_DELAY_MS: u64 = 500;
+const RETRY_BASE_DELAY_MS: u64 = 667;
 // upper bound on a server-suggested Retry-After we'll actually wait
 const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
