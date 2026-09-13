@@ -77,7 +77,7 @@ jobs:
       CC_x86_64_unknown_linux_musl: musl-gcc
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # CARGO_PKG_VERSION is baked in at compile time (User-Agent, startup
       # log), so rewrite it from the release tag before building — otherwise
@@ -90,7 +90,15 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
         run: |
           VERSION="${VERSION#v}"
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          # cargo needs full semver: v3.78 -> 3.78.0, v3 -> 3.0.0
+          case "$VERSION" in
+            *.*.*) ;;
+            *.*) VERSION="${VERSION}.0" ;;
+            *) VERSION="${VERSION}.0.0" ;;
+          esac
+          # portable rewrite: BSD sed on macOS rejects `sed -i`
+          sed "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml > Cargo.toml.tmp
+          mv Cargo.toml.tmp Cargo.toml
           echo "TUI version set to $VERSION"
 
       # ---- TUI (Rust) build ----
@@ -101,7 +109,7 @@ jobs:
 
       # build.rs compiles java/AlloyShim.java, so javac + jar must be on PATH
       - name: Install JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -170,13 +178,13 @@ jobs:
       # The CLI lives on the `cli` branch (Go source), so check it out into a
       # separate directory and build from there.
       - name: Checkout CLI branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: cli
           path: alloy-cli-src
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: '1.25'
 
@@ -223,7 +231,7 @@ jobs:
       # both TUI and CLI artifacts are uploaded so manual runs still leave
       # downloadable files
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -236,7 +244,7 @@ jobs:
       # auto-created at the default branch if it doesn't exist yet. skipped
       # when no version was provided (artifacts are still downloadable above).
       - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: github.event.inputs.version != ''
         with:
           tag_name: ${{ github.event.inputs.version }}
