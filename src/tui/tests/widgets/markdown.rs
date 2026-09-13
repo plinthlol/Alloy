@@ -136,3 +136,46 @@ fn decode_image_parses_a_png() {
 fn decode_image_rejects_garbage() {
     assert!(decode_image(b"not an image at all").is_err());
 }
+
+#[test]
+fn svg_fontdb_generic_families_resolve() {
+    // the whole point of SVG_FONTDB: when the system has any fonts at
+    // all, the generic serif slot (usvg's built-in last fallback for
+    // unmatchable font-family lists) must resolve — otherwise SVG text
+    // is silently skipped with "No match for ... font-family" warnings.
+    let db = &*crate::tui::widgets::markdown::SVG_FONTDB;
+    if db.faces().next().is_none() {
+        return; // fontless system (bare container): nothing to guarantee
+    }
+    for generic in [
+        resvg::usvg::fontdb::Family::Serif,
+        resvg::usvg::fontdb::Family::SansSerif,
+        resvg::usvg::fontdb::Family::Monospace,
+    ] {
+        let id = db.query(&resvg::usvg::fontdb::Query {
+            families: &[generic],
+            weight: resvg::usvg::fontdb::Weight::NORMAL,
+            stretch: resvg::usvg::fontdb::Stretch::Normal,
+            style: resvg::usvg::fontdb::Style::Normal,
+        });
+        assert!(id.is_some(), "generic family {generic:?} must resolve");
+    }
+}
+
+#[test]
+fn decode_image_renders_svg_with_unavailable_fonts() {
+    // SVGs in the wild ask for fonts that don't exist on the rendering
+    // system (Verdana/Geneva on Linux). the render must still succeed and
+    // fall back to a pinned generic font rather than dropping the text.
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">
+        <text x="2" y="20" font-family="'Verdana', 'Geneva', 'DejaVu Sans', sans-serif" font-size="12">Hi</text>
+    </svg>"#;
+    let decoded = decode_image(svg).expect("svg with unknown fonts decodes");
+    assert_eq!((decoded.width(), decoded.height()), (64, 32));
+    // text was actually rasterized: some pixels in the text area are opaque
+    let image = decoded.to_rgba8();
+    let has_ink = image
+        .enumerate_pixels()
+        .any(|(_, _, px)| px.0[3] > 0);
+    assert!(has_ink, "expected the fallback font to leave visible glyphs");
+}

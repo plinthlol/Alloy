@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use html_to_markdown_rs::{
     ConversionOptions, ImageMetadata,
@@ -229,6 +229,95 @@ pub fn image_urls(title: &str, body: &str) -> Vec<String> {
     Document::new(title, body).image_urls()
 }
 
+// one fontdb shared by all SVG decodes. load_system_fonts() scans the
+// filesystem (tens of ms+), so doing it per image adds up fast on a
+// description popup with several SVGs.
+//
+// also the place where generic font families get pinned: usvg resolves
+// SVG text by trying the SVG's font-family list, then falling back to
+// the generic serif slot — but fontdb only fills those slots from
+// fontconfig aliases on Linux, which bare containers / minimal installs
+// don't have. with nothing pinned, text in SVGs asking for e.g. Verdana
+// ("No match for '"Verdana", "Geneva"...' warnings) gets skipped
+// entirely. so pin real, commonly-installed fonts to the generic slots,
+// with a last-resort "whatever fontdb actually loaded" fallback.
+static SVG_FONTDB: LazyLock<resvg::usvg::fontdb::Database> = LazyLock::new(|| {
+    let mut db = resvg::usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    pin_generic_font_fallbacks(&mut db);
+    db
+});
+
+// best candidates per generic family, most preferred first — ordered so
+// the classic Linux desktop fonts win, then the metric-compatible
+// stand-ins, then whatever Windows/macOS fonts happen to exist.
+const FALLBACK_SANS: &[&str] = &[
+    "DejaVu Sans",
+    "Noto Sans",
+    "Liberation Sans",
+    "Ubuntu",
+    "Arial",
+    "Helvetica",
+];
+const FALLBACK_SERIF: &[&str] = &[
+    "DejaVu Serif",
+    "Noto Serif",
+    "Liberation Serif",
+    "Times New Roman",
+    "Georgia",
+];
+const FALLBACK_MONO: &[&str] = &[
+    "DejaVu Sans Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Courier New",
+];
+
+// resolves the first installed font out of `names`, returning the
+// family name fontdb actually knows it by.
+fn first_installed_family(
+    db: &resvg::usvg::fontdb::Database,
+    names: &[&str],
+) -> Option<String> {
+    for name in names {
+        let id = db.query(&resvg::usvg::fontdb::Query {
+            families: &[resvg::usvg::fontdb::Family::Name(name)],
+            weight: resvg::usvg::fontdb::Weight::NORMAL,
+            stretch: resvg::usvg::fontdb::Stretch::Normal,
+            style: resvg::usvg::fontdb::Style::Normal,
+        });
+        if let Some(id) = id
+            && let Some(face) = db.face(id)
+            && let Some((family, _)) = face.families.first()
+        {
+            return Some(family.clone());
+        }
+    }
+    None
+}
+
+fn pin_generic_font_fallbacks(db: &mut resvg::usvg::fontdb::Database) {
+    let sans = first_installed_family(db, FALLBACK_SANS);
+    let serif = first_installed_family(db, FALLBACK_SERIF);
+    let mono = first_installed_family(db, FALLBACK_MONO);
+    // absolute last resort: the first face fontdb managed to load, so a
+    // system with exactly one weird font still renders *something*
+    let any = db
+        .faces()
+        .next()
+        .and_then(|face| face.families.first().map(|(family, _)| family.clone()));
+
+    if let Some(family) = sans.as_ref().or_else(|| any.as_ref()) {
+        db.set_sans_serif_family(family.clone());
+    }
+    if let Some(family) = serif.as_ref().or_else(|| any.as_ref()) {
+        db.set_serif_family(family.clone());
+    }
+    if let Some(family) = mono.as_ref().or(sans.as_ref()).or(any.as_ref()) {
+        db.set_monospace_family(family.clone());
+    }
+}
+
 pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -242,7 +331,10 @@ pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
         return Ok(image);
     }
     let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    // shared, pre-pinned fontdb: no per-image font rescan, and working
+    // generic-family fallbacks so SVG text renders even when the SVG
+    // asks for fonts this system doesn't have (see SVG_FONTDB)
+    *options.fontdb_mut() = SVG_FONTDB.clone();
     let tree = resvg::usvg::Tree::from_data(bytes, &options).map_err(|error| error.to_string())?;
     let size = tree.size().to_int_size();
     let allocation = u64::from(size.width())
