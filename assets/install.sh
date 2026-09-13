@@ -44,7 +44,6 @@ case "$(uname -s)" in
     MINGW64*|MSYS*|CYGWIN*|Windows_NT) EXE=".exe" ;;
 esac
 
-echo
 echo "Select Alloy variant:"
 echo "  1) alloysh  (TUI, recommended)"
 echo "  2) alloyctl (CLI)"
