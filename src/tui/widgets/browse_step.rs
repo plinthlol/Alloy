@@ -55,6 +55,8 @@ pub fn render_search_step(
     // (the modpack browser in new_instance, which installs into a
     // not-yet-created instance so "already installed" doesn't apply).
     installed: Option<&std::collections::HashMap<String, String>>,
+    // bundled icon shown for hits the catalog gave no image for
+    fallback: web_icon::FallbackIcon,
 ) {
     let theme = THEME.as_ref();
     let chunks = Layout::default()
@@ -194,13 +196,23 @@ pub fn render_search_step(
                 && let Ok(mut cache) = WEB_ICONS.lock()
             {
                 for (i, hit) in hits.iter().enumerate().skip(offset) {
-                    let Some(url) = hit.icon_url() else { continue };
                     let row_top = chunks[1].y + ((i - offset) as u16) * ROW_LINES;
                     if row_top + TEXT_LINES > chunks[1].y + chunks[1].height {
                         break;
                     }
-                    cache.request(url);
-                    if let Some(proto) = cache.get(url) {
+                    // hits without an icon render the bundled fallback
+                    // instead of a blank slot
+                    let icon_key: &str = match hit.icon_url() {
+                        Some(url) => {
+                            cache.request(url);
+                            url
+                        }
+                        None => {
+                            cache.request_fallback(fallback);
+                            fallback.key()
+                        }
+                    };
+                    if let Some(proto) = cache.get(icon_key) {
                         let icon_area = Rect {
                             // +1 so the icon starts past the row's accent
                             // marker column, matching the padding above.

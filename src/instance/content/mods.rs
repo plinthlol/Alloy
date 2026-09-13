@@ -539,6 +539,10 @@ pub(crate) fn unknown_world_bytes() -> &'static [u8] {
     include_bytes!("../../../assets/unknown_world.png")
 }
 
+pub(crate) fn unknown_modpack_bytes() -> &'static [u8] {
+    include_bytes!("../../../assets/unknown_modpack.png")
+}
+
 // 6x3 last-resort icon for mods without icons, rendered from the bundled
 // unknown_mod.png. only reached if that asset itself fails to decode (see
 // fallback_icon_from_asset) — the normal path runs unknown_mod_bytes()

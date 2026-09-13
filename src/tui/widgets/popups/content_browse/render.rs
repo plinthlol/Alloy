@@ -10,6 +10,7 @@
 use super::state::{BROWSE_STATE, BrowseStep, ContentBrowseState, ContentKind};
 use crate::config::theme::THEME;
 use crate::tui::widgets::browse_step::{self, SearchStepCopy};
+use crate::tui::widgets::web_icon;
 use crate::tui::widgets::popups::base::PopupFrame;
 use crate::tui::widgets::popups::description;
 use crate::tui::widgets::popups::keybind_line;
@@ -193,6 +194,14 @@ fn render_search_step(
         copy,
         font_size,
         Some(&state.installed),
+        match state.kind {
+            crate::tui::widgets::popups::content_browse::ContentKind::Mod => {
+                web_icon::FallbackIcon::Mod
+            }
+            crate::tui::widgets::popups::content_browse::ContentKind::ResourcePack => {
+                web_icon::FallbackIcon::ResourcePack
+            }
+        },
     );
 }
 

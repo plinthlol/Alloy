@@ -12,6 +12,7 @@ use crate::config::theme::THEME;
 use crate::instance::models::ModLoader;
 use crate::tui::app::FocusedArea;
 use crate::tui::widgets::browse_step;
+use crate::tui::widgets::web_icon;
 use crate::tui::widgets::popups::base::PopupFrame;
 use ratatui::{
     Frame,
@@ -464,6 +465,7 @@ fn render_modpack_browse_step(
         copy,
         font_size,
         None,
+        web_icon::FallbackIcon::Modpack,
     );
 }
 

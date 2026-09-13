@@ -44,6 +44,36 @@ struct PendingIcon {
     image: image::DynamicImage,
 }
 
+// bundled "no icon" images, shown when a search hit has no icon_url.
+// rendered through the same cache/protocol pipeline as real icons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackIcon {
+    Mod,
+    ResourcePack,
+    Modpack,
+}
+
+impl FallbackIcon {
+    // pseudo-url key into the protocols map
+    pub fn key(self) -> &'static str {
+        match self {
+            FallbackIcon::Mod => "builtin:mod",
+            FallbackIcon::ResourcePack => "builtin:resourcepack",
+            FallbackIcon::Modpack => "builtin:modpack",
+        }
+    }
+
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            FallbackIcon::Mod => crate::instance::content::mods::unknown_mod_bytes(),
+            FallbackIcon::ResourcePack => {
+                crate::instance::content::mods::unknown_resource_pack_bytes()
+            }
+            FallbackIcon::Modpack => crate::instance::content::mods::unknown_modpack_bytes(),
+        }
+    }
+}
+
 pub struct WebIconCache {
     protocols: HashMap<String, StatefulProtocol>,
     requested: HashSet<String>,
@@ -350,6 +380,32 @@ impl WebIconCache {
         });
     }
 
+    /// queue decoding of the bundled fallback icon; becomes renderable via
+    /// `get(kind.key())` after the next `drain`.
+    pub fn request_fallback(&mut self, kind: FallbackIcon) {
+        let key = kind.key();
+        if self.protocols.contains_key(key) || !self.requested.insert(key.to_string()) {
+            return;
+        }
+        let bytes = kind.bytes();
+        let pending = self.pending.clone();
+        tokio::spawn(async move {
+            let decoded = tokio::task::spawn_blocking(move || decode_thumbnail(bytes.to_vec()))
+                .await
+                .ok()
+                .flatten();
+            if let Some(image) = decoded
+                && let Ok(mut slot) = pending.lock()
+            {
+                slot.push(PendingIcon {
+                    url: key.to_string(),
+                    image,
+                });
+                crate::tui::request_redraw();
+            }
+        });
+    }
+
     /// turn any freshly-decoded images into terminal protocols. call once
     /// per tick from the event loop, same as ContentListState::drain_image_loads
     /// - protocol construction touches the picker/terminal state so it has
@@ -373,4 +429,30 @@ pub fn square_icon_columns(rows: u16, font_size: (u16, u16)) -> u16 {
     let width = u32::from(font_size.0.max(1));
     let height = u32::from(font_size.1.max(1));
     ((u32::from(rows) * height + width / 2) / width).max(1) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FallbackIcon;
+
+    #[test]
+    fn fallback_assets_decode_and_keys_are_distinct() {
+        let kinds = [
+            FallbackIcon::Mod,
+            FallbackIcon::ResourcePack,
+            FallbackIcon::Modpack,
+        ];
+        for kind in kinds {
+            assert!(
+                image::load_from_memory(kind.bytes()).is_ok(),
+                "{kind:?} fallback asset must be a valid image"
+            );
+        }
+        let keys: Vec<&str> = kinds.iter().map(|k| k.key()).collect();
+        for (i, a) in keys.iter().enumerate() {
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b, "fallback keys must be unique");
+            }
+        }
+    }
 }
