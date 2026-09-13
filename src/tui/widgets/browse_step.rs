@@ -201,7 +201,9 @@ pub fn render_search_step(
                         break;
                     }
                     // hits without an icon render the bundled fallback
-                    // instead of a blank slot
+                    // instead of a blank slot; hits whose icon is still
+                    // loading or failed to fetch get it too, until the
+                    // real one lands
                     let icon_key: &str = match hit.icon_url() {
                         Some(url) => {
                             cache.request(url);
@@ -212,7 +214,16 @@ pub fn render_search_step(
                             fallback.key()
                         }
                     };
-                    if let Some(proto) = cache.get(icon_key) {
+                    let have_real = cache.get(icon_key).is_some();
+                    if !have_real && icon_key != fallback.key() {
+                        cache.request_fallback(fallback);
+                    }
+                    let shown = if have_real {
+                        icon_key
+                    } else {
+                        fallback.key()
+                    };
+                    if let Some(proto) = cache.get(shown) {
                         let icon_area = Rect {
                             // +1 so the icon starts past the row's accent
                             // marker column, matching the padding above.
