@@ -79,6 +79,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # CARGO_PKG_VERSION is baked in at compile time (User-Agent, startup
+      # log), so rewrite it from the release tag before building — otherwise
+      # every binary reports 1.0.0 no matter the tag. run-local only: the
+      # repo's Cargo.toml is left untouched.
+      - name: Sync version from release tag
+        if: github.event.inputs.version != ''
+        shell: bash
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          VERSION="${VERSION#v}"
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          echo "TUI version set to $VERSION"
+
       # ---- TUI (Rust) build ----
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
