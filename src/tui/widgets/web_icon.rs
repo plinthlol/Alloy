@@ -387,23 +387,21 @@ impl WebIconCache {
         if self.protocols.contains_key(key) || !self.requested.insert(key.to_string()) {
             return;
         }
-        let bytes = kind.bytes();
-        let pending = self.pending.clone();
-        tokio::spawn(async move {
-            let decoded = tokio::task::spawn_blocking(move || decode_thumbnail(bytes.to_vec()))
-                .await
-                .ok()
-                .flatten();
-            if let Some(image) = decoded
-                && let Ok(mut slot) = pending.lock()
-            {
-                slot.push(PendingIcon {
-                    url: key.to_string(),
-                    image,
-                });
-                crate::tui::request_redraw();
+        // bundled bytes, a few KB: decode inline, no fetch/task needed
+        match decode_thumbnail(kind.bytes().to_vec()) {
+            Some(image) => {
+                if let Ok(mut slot) = self.pending.lock() {
+                    slot.push(PendingIcon {
+                        url: key.to_string(),
+                        image,
+                    });
+                }
             }
-        });
+            None => {
+                tracing::debug!("Failed to decode fallback icon {key}");
+                self.requested.remove(key); // allow a retry next frame
+            }
+        }
     }
 
     /// turn any freshly-decoded images into terminal protocols. call once
