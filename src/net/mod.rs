@@ -23,16 +23,11 @@ use std::sync::{Arc, LazyLock, Mutex};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
-// hosts whose API endpoints get client-side rate limiting. CDN/download
-// hosts (cdn.modrinth.com, mediafilez.forgecdn.org, ...) are deliberately
-// excluded — bulk modpack downloads would crawl at 2/s otherwise, and
-// those endpoints don't count against the API rate limits.
+// API hosts that get rate limited. downloads/CDNs stay ungated.
 const MODRINTH_API_HOST: &str = "api.modrinth.com";
 const CURSEFORGE_API_HOST: &str = "api.curseforge.com";
 
-// max API requests per host within one sliding window, and the window.
-// a caller that would exceed the budget parks (async) until the oldest
-// request slides out of the window — requests queue rather than fail.
+// max requests per host per window; excess callers queue.
 const RATE_LIMIT_MAX_PER_WINDOW: usize = 2;
 const RATE_LIMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -48,9 +43,7 @@ pub enum NetError {
     StatusError {
         status: u16,
         url: String,
-        // server-provided Retry-After, when the response carried one (only
-        // the numeric delay-seconds form; HTTP-dates degrade to None and
-        // the retry envelope falls back to exponential backoff)
+        // numeric Retry-After from the server, if any
         retry_after: Option<std::time::Duration>,
     },
     #[error("invalid JSON from {url} (status {status}, body: {snippet})")]
@@ -66,9 +59,7 @@ pub enum NetError {
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client,
-    // per-host rate limiters, created lazily on first gated request.
-    // std Mutex is fine here: it's only held to clone an Arc, never
-    // across an await.
+    // per-host rate limiters, shared across clones
     limiters: Arc<Mutex<HashMap<&'static str, Arc<RateLimiter>>>>,
 }
 
@@ -252,18 +243,14 @@ impl HttpClient {
     }
 }
 
-// Retry-After is either delay-seconds or an HTTP-date; only the numeric
-// form translates into a useful delay here, so date values degrade to
-// None and the retry envelope falls back to exponential backoff.
+// numeric Retry-After only; HTTP-dates fall back to backoff.
 fn parse_retry_after(response: &reqwest::Response) -> Option<std::time::Duration> {
     let value = response.headers().get(reqwest::header::RETRY_AFTER)?;
     let secs: u64 = value.to_str().ok()?.trim().parse().ok()?;
     Some(std::time::Duration::from_secs(secs))
 }
 
-// maps a url to its rate-limited host, or None if the host isn't one of
-// the throttled API endpoints (everything else — CDNs, Mojang, loaders —
-// goes through ungated).
+// maps a url to its rate-limited host, None = ungated.
 fn rate_limited_host(url: &str) -> Option<&'static str> {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     // drop userinfo (user@host) if present, then the path/query
@@ -280,10 +267,7 @@ fn rate_limited_host(url: &str) -> Option<&'static str> {
 }
 
 impl HttpClient {
-    // waits for a rate-limit slot for `url`'s host before the request
-    // goes out. no-op for hosts not in the throttle list. retry attempts
-    // (which re-enter get/get_with_headers) each acquire their own slot,
-    // so a retry storm can't bypass the budget either.
+    // wait for a slot before sending; no-op for non-throttled hosts.
     async fn gate(&self, url: &str) {
         let Some(host) = rate_limited_host(url) else {
             return;
@@ -296,10 +280,8 @@ impl HttpClient {
     }
 }
 
-// sliding-window rate limiter: keeps the timestamps of the last window's
-// requests; when the window is full, `acquire` sleeps until the oldest
-// timestamp ages out and retries. FIFO by lock ordering, so queued
-// callers are admitted in roughly the order they arrived.
+// rolling window: timestamps of recent sends; full window = wait for
+// the oldest one to age out.
 struct RateLimiter {
     recent: tokio::sync::Mutex<VecDeque<tokio::time::Instant>>,
 }
@@ -311,8 +293,7 @@ impl RateLimiter {
         }
     }
 
-    // reserves one request slot, blocking until the window has room.
-    // must be awaited before actually sending the request.
+    // reserves a slot, waiting until the window has room.
     async fn acquire(&self) {
         loop {
             let now = tokio::time::Instant::now();
@@ -431,9 +412,7 @@ async fn decode_json_response<T: DeserializeOwned>(
         let head = String::from_utf8_lossy(&bytes[..bytes.len().min(200)])
             .escape_debug()
             .collect::<String>();
-        // include the serde error itself — a bare body snippet doesn't tell
-        // you *why* the parse failed (missing field vs null-into-String vs
-        // truncated), and without it 200-with-garbage is undebuggable
+        // serde error included so parse failures are debuggable
         tracing::debug!(
             "JSON decode failed for {} (status {}, content-type {}, {} bytes): {} — {}",
             url,
@@ -452,8 +431,7 @@ async fn decode_json_response<T: DeserializeOwned>(
 }
 
 async fn sleep_before_retry(kind: &str, url: &str, attempt: u32, err: &NetError) {
-    // honor the server's Retry-After when it sent one, capped so a hostile
-    // header can't stall an install for minutes; otherwise exponential backoff
+    // Retry-After wins when present (capped); else exponential backoff
     let server_delay = if let NetError::StatusError {
         retry_after: Some(d),
         ..
@@ -627,9 +605,7 @@ fn is_retryable(err: &NetError) -> bool {
     match err {
         NetError::Http(e) => e.is_timeout() || e.is_body() || e.is_connect(),
         NetError::StatusError { status, .. } => *status >= 500 || *status == 429,
-        // a parse failure is deterministic: the same body will fail the
-        // same way every time, so retrying just stalls the caller for
-        // seconds before surfacing the identical error
+        // parse failures are deterministic — retrying won't help
         NetError::BadJson { .. } => false,
         _ => false,
     }

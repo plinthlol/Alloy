@@ -301,11 +301,7 @@ pub struct GalleryImage {
     pub ordering: i64,
 }
 
-// serde's `#[serde(default)]` only kicks in when a field is *absent* — an
-// explicit `"field": null` still fails to deserialize into String. Modrinth
-// sends nulls in practice (e.g. gallery[0].description on some projects),
-// which killed the whole /v2/project fetch for those projects, so treat
-// null as "use the default" here.
+// #[serde(default)] ignores explicit nulls; Modrinth sends some.
 fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -386,10 +382,8 @@ mod tests {
         assert_eq!(urlencode("fabric-1.20.1"), "fabric-1.20.1");
     }
 
-    // regression: Modrinth sends "description": null in gallery items on
-    // some projects (e.g. sKO5olCV). serde's `#[serde(default)]` only
-    // covers *absent* fields, so an explicit null used to kill the whole
-    // /v2/project parse — and BadJson used to retry it 4x for good measure.
+    // regression: Modrinth sends "description": null in gallery items,
+    // which used to kill the whole /v2/project parse
     #[test]
     fn project_body_tolerates_explicit_nulls() {
         let json = serde_json::json!({
